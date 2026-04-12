@@ -25,7 +25,9 @@ class CameraInfo:
     frame_size: tuple[int, int] | None = None
 
 
-def discover_cameras(max_devices: int = 4) -> list[CameraInfo]:
+def discover_cameras(max_devices: int | None = None) -> list[CameraInfo]:
+    if max_devices is None:
+        max_devices = 1 if sys.platform == "darwin" else 4
     found: list[CameraInfo] = []
     for index in range(max_devices):
         for backend in _backend_candidates():
@@ -70,9 +72,9 @@ class CameraStream:
 
 
 def open_camera(index: int | None = None, width: int = 1280, height: int = 720) -> CameraStream:
-    candidates = [index] if index is not None else [info.index for info in discover_cameras(max_devices=4)]
+    candidates = [index] if index is not None else [info.index for info in discover_cameras()]
     if not candidates:
-        candidates = list(range(4))
+        candidates = list(range(1 if sys.platform == "darwin" else 4))
     for camera_index in candidates:
         for backend in _backend_candidates():
             capture = cv2.VideoCapture(camera_index, backend)

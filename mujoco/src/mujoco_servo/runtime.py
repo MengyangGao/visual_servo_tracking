@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
@@ -69,6 +71,15 @@ def _focus_point_from(telemetry: ServoTelemetry, ee_position: np.ndarray) -> tup
 def _camera_intrinsics_for_frame(frame: np.ndarray) -> CameraIntrinsics:
     h, w = frame.shape[:2]
     return CameraIntrinsics(fx=0.92 * w, fy=0.92 * w, cx=w / 2.0, cy=h / 2.0, width=w, height=h)
+
+
+def _should_open_camera_preview() -> bool:
+    forced = os.getenv("MUJOCO_SERVO_ENABLE_TK_PREVIEW", "").strip().lower()
+    if forced in {"1", "true", "yes", "on"}:
+        return True
+    if forced in {"0", "false", "no", "off"}:
+        return False
+    return sys.platform != "darwin"
 
 
 def _vision_config(settings: AppSettings) -> GroundedSam2Config | None:
@@ -248,7 +259,7 @@ def run_camera(
             data,
             lookat=(lookat[0], lookat[1], lookat[2] + 0.05),
         )
-        if threading.current_thread() is threading.main_thread():
+        if threading.current_thread() is threading.main_thread() and _should_open_camera_preview():
             try:
                 camera_preview = CameraPreviewWindow(title="mujoco-servo camera")
             except Exception:

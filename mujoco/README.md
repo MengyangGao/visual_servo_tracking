@@ -65,7 +65,7 @@ conda run -n mujoco python -m mujoco_servo camera --prompt "cup" --backend groun
 ```
 
 On macOS, run camera mode with `mjpython` so the official MuJoCo viewer can launch.
-The robot scene uses the MuJoCo viewer, and the live camera frame is shown in a Tk preview window instead of OpenCV highgui.
+The robot scene uses the MuJoCo viewer. The separate live camera preview is disabled by default on macOS because Tk and `mjpython` can clash; enable it with `MUJOCO_SERVO_ENABLE_TK_PREVIEW=1` if your setup is stable.
 
 Use `--backend heuristic` if you want a lightweight local vision fallback without loading open-vocabulary weights.
 
