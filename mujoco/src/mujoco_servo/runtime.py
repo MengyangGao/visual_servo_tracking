@@ -19,7 +19,7 @@ from .geometry import rotation_matrix_to_quaternion_wxyz
 from .perception import GroundedSam2Config, OracleBackend, PerceptionSession, build_backend
 from .robot import build_robot_spec
 from .preview import CameraPreviewWindow
-from .rendering import MujocoSceneRenderer, MujocoViewerSession, side_by_side_view
+from .rendering import MujocoSceneRenderer, MujocoViewerSession, ViewLayout, side_by_side_view
 from .scene import body_pose_world, build_scene_bundle, set_mocap_body_pose
 from .types import CameraFrame, CameraIntrinsics, CameraPose, Detection, ServoTelemetry
 
@@ -34,7 +34,7 @@ def _overlay_status(frame_bgr: np.ndarray, detection: Detection, telemetry: Serv
     cv2.putText(img, title, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(
         img,
-        f"backend={telemetry.backend} score={telemetry.detection_score:.2f} pos_err={telemetry.position_error_m:.3f}m",
+        f"backend={telemetry.backend} score={telemetry.detection_score:.2f} feat={telemetry.feature_error_px:.1f}px pos={telemetry.position_error_m:.3f}m",
         (12, 52),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
@@ -61,16 +61,14 @@ def _camera_pose_for_real_mode() -> CameraPose:
     return canonical_camera_pose()
 
 
-def _focus_point_from(telemetry: ServoTelemetry, ee_position: np.ndarray) -> tuple[float, float, float]:
-    focus = 0.5 * (np.asarray(telemetry.target_position_m, dtype=float).reshape(3) + np.asarray(ee_position, dtype=float).reshape(3))
-    focus = focus.copy()
-    focus[2] += 0.05
-    return tuple(float(v) for v in focus)
-
-
 def _camera_intrinsics_for_frame(frame: np.ndarray) -> CameraIntrinsics:
     h, w = frame.shape[:2]
     return CameraIntrinsics(fx=0.92 * w, fy=0.92 * w, cx=w / 2.0, cy=h / 2.0, width=w, height=h)
+
+
+def _world_view_lookat(prompt: str) -> tuple[float, float, float]:
+    target = np.asarray(target_world_position(prompt), dtype=float)
+    return float(target[0]), float(target[1]), float(target[2] + 0.18)
 
 
 def _should_open_camera_preview() -> bool:
@@ -114,6 +112,7 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
     bundle = build_scene_bundle(robot_spec, settings.prompt, settings.camera_width, settings.camera_height)
     model, data = bundle.model, bundle.data
     target_proto = bundle.target_proto
+    ee_start_pos, _ = body_pose_world(model, data, bundle.ee_body_name)
     session = PerceptionSession(OracleBackend(target_world_position), settings.prompt)
     gains = ServoGains()
     dt = 1.0 / settings.control_rate_hz
@@ -121,19 +120,26 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
     writer = None
     viewer = None
     if settings.show_view or settings.record:
-        lookat = tuple(np.asarray(target_world_position(settings.prompt), dtype=float))
+        lookat = _world_view_lookat(settings.prompt)
         renderer = MujocoSceneRenderer(
             model,
             width=settings.robot_view_width,
             height=settings.robot_view_height,
-            lookat=(lookat[0], lookat[1], lookat[2] + 0.05),
+            lookat=(float(ee_start_pos[0]), float(ee_start_pos[1]), float(ee_start_pos[2] + 0.12)),
+            distance=1.2,
+            azimuth=160.0,
+            elevation=-18.0,
+            follow_body_name=bundle.ee_body_name,
         )
     if settings.show_view:
-        lookat = tuple(np.asarray(target_world_position(settings.prompt), dtype=float))
+        lookat = _world_view_lookat(settings.prompt)
         viewer = MujocoViewerSession(
             model,
             data,
-            lookat=(lookat[0], lookat[1], lookat[2] + 0.05),
+            lookat=lookat,
+            distance=2.4,
+            azimuth=128.0,
+            elevation=-22.0,
         )
     trace: list[dict] = []
     limit = settings.max_steps
@@ -179,11 +185,7 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
         set_mocap_body_pose(model, data, "vision_camera", bundle.camera_pose.translation_m, bundle.camera_pose.rotation_world_from_cam)
         set_mocap_body_pose(model, data, "vision_target", telemetry.target_position_m)
         set_mocap_body_pose(model, data, "vision_ee", ee_pos, ee_rot)
-        focus_point = _focus_point_from(telemetry, ee_pos)
-        if renderer is not None:
-            renderer.set_lookat(focus_point)
         if viewer is not None:
-            viewer.set_lookat(focus_point)
             viewer.sync()
             if not viewer.is_running():
                 break
@@ -198,6 +200,7 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
                 "backend": raw_detection.backend,
                 "position_error_m": telemetry.position_error_m,
                 "orientation_error_rad": telemetry.orientation_error_rad,
+                "feature_error_px": telemetry.feature_error_px,
                 "raw_success": raw_detection.success,
                 "used_hold": bool(not raw_detection.success and last_good_detection is None),
             }
@@ -216,6 +219,7 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
         "steps": settings.max_steps,
         "final_position_error_m": trace[-1]["position_error_m"] if trace else None,
         "final_orientation_error_rad": trace[-1]["orientation_error_rad"] if trace else None,
+        "final_feature_error_px": trace[-1]["feature_error_px"] if trace else None,
         "robot": robot_spec.name,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -233,6 +237,7 @@ def run_camera(
     bundle = build_scene_bundle(robot_spec, settings.prompt, settings.camera_width, settings.camera_height)
     model, data = bundle.model, bundle.data
     target_proto = bundle.target_proto
+    ee_start_pos, _ = body_pose_world(model, data, bundle.ee_body_name)
     camera = open_camera(settings.camera_index, width=settings.camera_width, height=settings.camera_height)
     backend = build_backend(settings.backend, settings.prompt, target_world_position, config=_vision_config(settings))
     session = PerceptionSession(backend, settings.prompt)
@@ -245,19 +250,26 @@ def run_camera(
     viewer = None
     camera_preview: CameraPreviewWindow | None = None
     if settings.show_view or settings.record:
-        lookat = tuple(np.asarray(target_world_position(settings.prompt), dtype=float))
+        lookat = _world_view_lookat(settings.prompt)
         renderer = MujocoSceneRenderer(
             model,
             width=settings.robot_view_width,
             height=settings.robot_view_height,
-            lookat=(lookat[0], lookat[1], lookat[2] + 0.05),
+            lookat=(float(ee_start_pos[0]), float(ee_start_pos[1]), float(ee_start_pos[2] + 0.12)),
+            distance=1.2,
+            azimuth=160.0,
+            elevation=-18.0,
+            follow_body_name=bundle.ee_body_name,
         )
     if settings.show_view:
-        lookat = tuple(np.asarray(target_world_position(settings.prompt), dtype=float))
+        lookat = _world_view_lookat(settings.prompt)
         viewer = MujocoViewerSession(
             model,
             data,
-            lookat=(lookat[0], lookat[1], lookat[2] + 0.05),
+            lookat=lookat,
+            distance=2.4,
+            azimuth=128.0,
+            elevation=-22.0,
         )
         if threading.current_thread() is threading.main_thread() and _should_open_camera_preview():
             try:
@@ -309,11 +321,7 @@ def run_camera(
             set_mocap_body_pose(model, data, "vision_camera", bundle.camera_pose.translation_m, bundle.camera_pose.rotation_world_from_cam)
             set_mocap_body_pose(model, data, "vision_target", telemetry.target_position_m)
             set_mocap_body_pose(model, data, "vision_ee", ee_pos, ee_rot)
-            focus_point = _focus_point_from(telemetry, ee_pos)
-            if renderer is not None:
-                renderer.set_lookat(focus_point)
             if viewer is not None:
-                viewer.set_lookat(focus_point)
                 viewer.sync()
                 if not viewer.is_running():
                     break
@@ -325,7 +333,8 @@ def run_camera(
                 telemetry,
                 title=f"{settings.mode} | {settings.run_mode} | {settings.prompt} | {status}",
             )
-            display_frame = side_by_side_view(robot_view, annotated) if robot_view is not None else annotated
+            display_layout = ViewLayout(robot_title="MuJoCo follow", camera_title="Real camera")
+            display_frame = side_by_side_view(robot_view, annotated, layout=display_layout) if robot_view is not None else annotated
             if settings.record and writer is None:
                 writer = _make_writer(
                     output_dir / "camera_tracking.mp4",
@@ -345,6 +354,7 @@ def run_camera(
                     "score": raw_detection.score,
                     "position_error_m": telemetry.position_error_m,
                     "orientation_error_rad": telemetry.orientation_error_rad,
+                    "feature_error_px": telemetry.feature_error_px,
                     "bbox": (raw_detection if raw_detection.success else (last_good_detection or raw_detection)).bbox_xyxy.tolist(),
                     "raw_success": raw_detection.success,
                     "used_hold": bool(not raw_detection.success and last_good_detection is not None),
@@ -368,6 +378,7 @@ def run_camera(
         "frames": frame_count,
         "final_position_error_m": trace[-1]["position_error_m"] if trace else None,
         "final_orientation_error_rad": trace[-1]["orientation_error_rad"] if trace else None,
+        "final_feature_error_px": trace[-1]["feature_error_px"] if trace else None,
         "camera_index": settings.camera_index,
         "robot": robot_spec.name,
         "vision_preset": settings.vision_preset,

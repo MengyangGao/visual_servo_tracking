@@ -10,8 +10,8 @@ import numpy as np
 
 @dataclass(slots=True)
 class ViewLayout:
-    robot_title: str = "MuJoCo view"
-    camera_title: str = "Camera view"
+    robot_title: str = "MuJoCo follow"
+    camera_title: str = "Real camera"
     label_scale: float = 0.62
     label_thickness: int = 2
     label_color: tuple[int, int, int] = (255, 255, 255)
@@ -65,9 +65,10 @@ class MujocoSceneRenderer:
         width: int = 640,
         height: int = 480,
         lookat: tuple[float, float, float] = (0.55, 0.0, 0.25),
-        distance: float = 1.6,
+        distance: float = 2.4,
         azimuth: float = 135.0,
         elevation: float = -20.0,
+        follow_body_name: str | None = None,
     ) -> None:
         self._renderer = mujoco.Renderer(model, height=height, width=width)
         self._camera = mujoco.MjvCamera()
@@ -78,8 +79,13 @@ class MujocoSceneRenderer:
         self._camera.elevation = float(elevation)
         self._camera.fixedcamid = -1
         self._camera.trackbodyid = -1
+        self._follow_body_id = -1
+        if follow_body_name is not None:
+            self._follow_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, follow_body_name)
 
     def render(self, data: mujoco.MjData) -> np.ndarray:
+        if self._follow_body_id >= 0:
+            self._camera.lookat[:] = np.array(data.xpos[self._follow_body_id], dtype=float)
         self._renderer.update_scene(data, camera=self._camera)
         frame = self._renderer.render()
         return _ensure_bgr(frame)
@@ -97,7 +103,7 @@ class MujocoViewerSession:
         model: mujoco.MjModel,
         data: mujoco.MjData,
         lookat: tuple[float, float, float] = (0.55, 0.0, 0.25),
-        distance: float = 1.6,
+        distance: float = 2.4,
         azimuth: float = 135.0,
         elevation: float = -20.0,
     ) -> None:

@@ -15,7 +15,7 @@ from PIL import Image
 from huggingface_hub import hf_hub_download
 
 from .config import canonical_prompt, lookup_target_prototype, project_root
-from .geometry import normalize
+from .image_features import bbox_corners_xyxy, corners_from_mask
 from .types import CameraIntrinsics, CameraPose, Detection, TargetPrototype
 
 
@@ -101,6 +101,14 @@ def _mask_from_bbox(frame_shape: tuple[int, int, int] | tuple[int, int], bbox_xy
     return mask
 
 
+def _corners_from_bbox_mask(frame_shape: tuple[int, int, int] | tuple[int, int], bbox_xyxy: np.ndarray) -> np.ndarray:
+    mask = _mask_from_bbox(frame_shape, bbox_xyxy)
+    corners = corners_from_mask(mask)
+    if corners is not None:
+        return corners
+    return bbox_corners_xyxy(bbox_xyxy)
+
+
 def _best_detection_index(scores: np.ndarray) -> int:
     if scores.size == 0:
         return -1
@@ -153,6 +161,7 @@ class OracleBackend(PerceptionBackend):
         nominal_half_extent = max(prototype.size_m[0], prototype.size_m[1]) * 0.5
         pixel_half = max(12.0, intrinsics.fx * nominal_half_extent / z)
         bbox = np.array([u - pixel_half, v - pixel_half, u + pixel_half, v + pixel_half], dtype=float)
+        corners = bbox_corners_xyxy(bbox)
         return Detection(
             success=True,
             prompt=prompt,
@@ -160,6 +169,7 @@ class OracleBackend(PerceptionBackend):
             score=0.99,
             bbox_xyxy=bbox,
             centroid_px=np.array([u, v], dtype=float),
+            corners_px=corners,
             mask=None,
             mask_area_px=int((2.0 * pixel_half) ** 2),
             estimated_distance_m=z,
@@ -243,6 +253,7 @@ class PromptGuidedVisionBackend(PerceptionBackend):
             score=detection.score,
             bbox_xyxy=detection.bbox_xyxy.copy(),
             centroid_px=detection.centroid_px.copy(),
+            corners_px=None if detection.corners_px is None else detection.corners_px.copy(),
             mask=detection.mask,
             mask_area_px=detection.mask_area_px,
             estimated_distance_m=detection.estimated_distance_m,
@@ -254,6 +265,9 @@ class PromptGuidedVisionBackend(PerceptionBackend):
         shifted.bbox_xyxy[[1, 3]] += offset_y
         shifted.centroid_px[[0]] += offset_x
         shifted.centroid_px[[1]] += offset_y
+        if shifted.corners_px is not None:
+            shifted.corners_px[:, 0] += offset_x
+            shifted.corners_px[:, 1] += offset_y
         if shifted.mask is not None:
             height, width = frame_shape[:2]
             full_mask = np.zeros((height, width), dtype=detection.mask.dtype)
@@ -324,6 +338,7 @@ class PromptGuidedVisionBackend(PerceptionBackend):
         x, y, bw, bh, centroid, area = best
         bbox = np.array([x, y, x + bw, y + bh], dtype=float)
         distance = estimate_distance_from_bbox(prototype, bbox, intrinsics)
+        corners = _corners_from_bbox_mask(frame_bgr.shape, bbox)
         return Detection(
             success=True,
             prompt=prompt,
@@ -331,6 +346,7 @@ class PromptGuidedVisionBackend(PerceptionBackend):
             score=min(1.0, best_score / max(float(w * h), 1.0)),
             bbox_xyxy=bbox,
             centroid_px=centroid,
+            corners_px=corners,
             mask=mask,
             mask_area_px=int(area),
             estimated_distance_m=distance,
@@ -390,7 +406,7 @@ class GroundedSam2Backend(PerceptionBackend):
         if requested in {"auto", ""}:
             if torch.cuda.is_available():
                 return "cuda"
-            if torch.backends.mps.is_available():
+            if sys.platform != "darwin" and torch.backends.mps.is_available():
                 return "mps"
             return "cpu"
         return requested
@@ -520,6 +536,9 @@ class GroundedSam2Backend(PerceptionBackend):
         mask = self._segment_boxes(frame_bgr, boxes[[idx]])[0]
         centroid = np.array([(box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0], dtype=float)
         distance = estimate_distance_from_bbox(prototype, box, intrinsics)
+        corners = corners_from_mask(mask)
+        if corners is None:
+            corners = bbox_corners_xyxy(box)
         return Detection(
             success=True,
             prompt=prompt,
@@ -527,6 +546,7 @@ class GroundedSam2Backend(PerceptionBackend):
             score=float(scores[idx]),
             bbox_xyxy=np.asarray(box, dtype=float),
             centroid_px=centroid,
+            corners_px=corners,
             mask=mask,
             mask_area_px=int(np.count_nonzero(mask)),
             estimated_distance_m=distance,

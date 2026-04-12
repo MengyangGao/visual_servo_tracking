@@ -48,6 +48,7 @@ class Detection:
     score: float
     bbox_xyxy: np.ndarray
     centroid_px: np.ndarray
+    corners_px: Optional[np.ndarray] = None
     mask: Optional[np.ndarray] = None
     mask_area_px: int = 0
     estimated_distance_m: Optional[float] = None
@@ -69,6 +70,7 @@ class ServoTelemetry:
     position_error_m: float
     orientation_error_rad: float
     detection_score: float
+    feature_error_px: float = 0.0
 
 
 @dataclass(slots=True)

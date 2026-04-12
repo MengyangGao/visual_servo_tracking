@@ -9,6 +9,7 @@ import numpy as np
 from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.config import default_camera_intrinsics, target_world_position
+from mujoco_servo.image_features import bbox_corners_xyxy
 from mujoco_servo.perception import (
     OracleBackend,
     GroundedSam2Config,
@@ -72,6 +73,8 @@ class PerceptionTest(unittest.TestCase):
         self.assertEqual(detection.backend, "oracle")
         self.assertIsNotNone(detection.target_position_world)
         self.assertGreater(detection.estimated_distance_m or 0.0, 0.0)
+        self.assertIsNotNone(detection.corners_px)
+        self.assertEqual(np.asarray(detection.corners_px).shape, (4, 2))
 
     def test_heuristic_color_detection(self) -> None:
         image = np.zeros((240, 320, 3), dtype=np.uint8)
@@ -82,6 +85,8 @@ class PerceptionTest(unittest.TestCase):
         self.assertTrue(detection.success)
         self.assertEqual(detection.backend, "heuristic")
         self.assertGreater(detection.mask_area_px, 0)
+        self.assertIsNotNone(detection.corners_px)
+        self.assertEqual(np.asarray(detection.corners_px).shape, (4, 2))
         x1, y1, x2, y2 = detection.bbox_xyxy
         self.assertGreater(x2 - x1, 10)
         self.assertGreater(y2 - y1, 10)
@@ -98,6 +103,8 @@ class PerceptionTest(unittest.TestCase):
         tracked = backend.track(frame_b, "red cup", intr, CameraPose.identity(), first)
         self.assertTrue(tracked.success)
         self.assertEqual(tracked.mask.shape, frame_b.shape[:2])
+        self.assertIsNotNone(tracked.corners_px)
+        self.assertEqual(np.asarray(tracked.corners_px).shape, (4, 2))
         x1, y1, x2, y2 = tracked.bbox_xyxy
         self.assertAlmostEqual(float(x1), 160.0, delta=20.0)
         self.assertAlmostEqual(float(y1), 80.0, delta=20.0)
@@ -118,6 +125,12 @@ class PerceptionTest(unittest.TestCase):
         self.assertEqual(small.sam2_checkpoint_name, "sam2.1_hiera_small.pt")
         self.assertEqual(lite.grounding_model_id, "IDEA-Research/grounding-dino-tiny")
         self.assertEqual(lite.sam2_checkpoint_name, "sam2.1_hiera_tiny.pt")
+
+    def test_bbox_corners_are_ordered(self) -> None:
+        corners = bbox_corners_xyxy(np.array([10.0, 20.0, 30.0, 40.0]))
+        self.assertEqual(corners.shape, (4, 2))
+        self.assertAlmostEqual(float(corners[0, 0]), 10.0)
+        self.assertAlmostEqual(float(corners[0, 1]), 20.0)
 
 
 if __name__ == "__main__":

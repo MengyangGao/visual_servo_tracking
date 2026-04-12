@@ -10,6 +10,8 @@ import numpy as np
 from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.config import build_settings
+from mujoco_servo.control import ServoGains, compute_servo_command
+from mujoco_servo.types import Detection
 from mujoco_servo.robot import build_robot_spec
 from mujoco_servo.scene import build_scene_bundle, set_mocap_body_pose
 from mujoco_servo.rendering import side_by_side_view
@@ -73,6 +75,35 @@ class RuntimeSmokeTest(unittest.TestCase):
             body_id = mujoco.mj_name2id(bundle.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
             self.assertGreaterEqual(body_id, 0)
             self.assertTrue(set_mocap_body_pose(bundle.model, bundle.data, body_name, np.array([0.1, 0.2, 0.3]), np.eye(3)))
+
+    def test_feature_servo_command_uses_corners(self) -> None:
+        spec = build_robot_spec(prefer_reference=False)
+        bundle = build_scene_bundle(spec, "phone", 640, 480)
+        det = Detection(
+            success=True,
+            prompt="phone",
+            label="phone",
+            score=0.92,
+            bbox_xyxy=np.array([220.0, 140.0, 340.0, 280.0]),
+            centroid_px=np.array([280.0, 210.0]),
+            corners_px=np.array([[220.0, 140.0], [340.0, 140.0], [340.0, 280.0], [220.0, 280.0]]),
+            estimated_distance_m=0.42,
+            backend="heuristic",
+        )
+        qpos_cmd, telemetry = compute_servo_command(
+            model=bundle.model,
+            data=bundle.data,
+            detection=det,
+            prototype=bundle.target_proto,
+            camera_intrinsics=bundle.camera_intrinsics,
+            camera_pose=bundle.camera_pose,
+            ee_body_name=bundle.ee_body_name,
+            gains=ServoGains(),
+            dt=1.0 / 30.0,
+        )
+        self.assertEqual(qpos_cmd.shape[0], bundle.model.nq)
+        self.assertTrue(np.isfinite(qpos_cmd).all())
+        self.assertGreater(telemetry.feature_error_px, 0.0)
 
 
 if __name__ == "__main__":
