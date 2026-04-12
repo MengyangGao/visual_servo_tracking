@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mujoco-servo"
+version = "0.1.0"
+description = "MuJoCo vision servo with prompt-driven perception"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=1.26",
+  "opencv-python>=4.10",
+  "mujoco>=3.4",
+]
+
+[project.scripts]
+mujoco-servo = "mujoco_servo.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

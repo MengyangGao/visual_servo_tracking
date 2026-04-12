@@ -1,0 +1,17 @@
+docs/
+.DS_Store
+results/run_log.txt
+results/**/*.txt
+results/**/*.png
+results/**/*.mp4
+results/**/*.pdf
+results/**/raw_frames/
+Image*.png
+plan.md
+*.asv
+*.log
+*.tmp
+*.mat
+
+# Explicit public calibration asset.
+!assets/cameraParams.mat
