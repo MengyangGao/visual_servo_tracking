@@ -44,6 +44,27 @@ class GroundedSam2Config:
     device: str = os.getenv("MUJOCO_SERVO_DEVICE", "auto")
     allow_bbox_fallback: bool = os.getenv("MUJOCO_SERVO_ALLOW_BBOX_FALLBACK", "1") != "0"
 
+    @classmethod
+    def from_preset(cls, preset: str) -> "GroundedSam2Config":
+        normalized = canonical_prompt(preset)
+        if normalized in {"lite", "fast", "tiny"}:
+            return cls(
+                grounding_model_id="IDEA-Research/grounding-dino-tiny",
+                sam2_repo_id="facebook/sam2.1-hiera-tiny",
+                sam2_model_cfg_name="configs/sam2.1/sam2.1_hiera_t.yaml",
+                sam2_checkpoint_name="sam2.1_hiera_tiny.pt",
+            )
+        if normalized in {"small"}:
+            return cls(
+                grounding_model_id="IDEA-Research/grounding-dino-tiny",
+                sam2_repo_id="facebook/sam2.1-hiera-small",
+                sam2_model_cfg_name="configs/sam2.1/sam2.1_hiera_s.yaml",
+                sam2_checkpoint_name="sam2.1_hiera_small.pt",
+            )
+        if normalized in {"base", "default", "balanced", "default-base"}:
+            return cls()
+        return cls()
+
 
 def _ensure_path_on_sys_path(path: Path) -> None:
     resolved = str(path.resolve())
@@ -539,7 +560,12 @@ class GroundedSam2Backend(PerceptionBackend):
         return self._detect_best(frame_bgr, prompt, intrinsics)
 
 
-def build_backend(name: str, prompt: str, target_pose_provider: Callable[[str], np.ndarray]) -> PerceptionBackend:
+def build_backend(
+    name: str,
+    prompt: str,
+    target_pose_provider: Callable[[str], np.ndarray],
+    config: GroundedSam2Config | None = None,
+) -> PerceptionBackend:
     normalized = canonical_prompt(name)
     if normalized in {"oracle", "simulation", "sim"}:
         return OracleBackend(target_pose_provider)
@@ -547,13 +573,13 @@ def build_backend(name: str, prompt: str, target_pose_provider: Callable[[str], 
         return PromptGuidedVisionBackend()
     if normalized in {"grounded-sam2", "grounded_sam2", "open-vocab", "open_vocab"}:
         try:
-            return GroundedSam2Backend()
+            return GroundedSam2Backend(config=config)
         except Exception as exc:  # noqa: BLE001
             warnings.warn(f"Falling back to heuristic backend: {exc}", RuntimeWarning)
             return PromptGuidedVisionBackend()
     if normalized == "auto":
         try:
-            return GroundedSam2Backend()
+            return GroundedSam2Backend(config=config)
         except Exception:
             return PromptGuidedVisionBackend()
     return PromptGuidedVisionBackend()

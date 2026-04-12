@@ -14,8 +14,9 @@ from .config import AppSettings, build_settings, target_world_position
 from .config import project_root
 from .control import ServoGains, compute_servo_command
 from .geometry import rotation_matrix_to_quaternion_wxyz
-from .perception import OracleBackend, PerceptionSession, build_backend
+from .perception import GroundedSam2Config, OracleBackend, PerceptionSession, build_backend
 from .robot import build_robot_spec
+from .rendering import MujocoSceneRenderer, side_by_side_view
 from .scene import body_pose_world, build_scene_bundle
 from .types import CameraFrame, CameraIntrinsics, CameraPose, Detection, ServoTelemetry
 
@@ -62,6 +63,13 @@ def _camera_intrinsics_for_frame(frame: np.ndarray) -> CameraIntrinsics:
     return CameraIntrinsics(fx=0.92 * w, fy=0.92 * w, cx=w / 2.0, cy=h / 2.0, width=w, height=h)
 
 
+def _vision_config(settings: AppSettings) -> GroundedSam2Config | None:
+    normalized = settings.backend.strip().lower()
+    if normalized in {"grounded-sam2", "grounded_sam2", "open-vocab", "open_vocab", "auto"}:
+        return GroundedSam2Config.from_preset(settings.vision_preset)
+    return None
+
+
 def _hold_control(model: mujoco.MjModel, data: mujoco.MjData, prompt: str, backend: str, step: int, ee_body_name: str, detection_score: float) -> tuple[np.ndarray, ServoTelemetry]:
     ee_pos, ee_rot = body_pose_world(model, data, ee_body_name)
     qpos = np.array(data.qpos.copy(), dtype=float)
@@ -90,6 +98,16 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
     session = PerceptionSession(OracleBackend(target_world_position), settings.prompt)
     gains = ServoGains()
     dt = 1.0 / settings.control_rate_hz
+    renderer = None
+    writer = None
+    if settings.show_view or settings.record:
+        lookat = tuple(np.asarray(target_world_position(settings.prompt), dtype=float))
+        renderer = MujocoSceneRenderer(
+            model,
+            width=settings.robot_view_width,
+            height=settings.robot_view_height,
+            lookat=(lookat[0], lookat[1], lookat[2] + 0.05),
+        )
     trace: list[dict] = []
     limit = settings.max_steps
     step = 0
@@ -130,6 +148,16 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
             if aid >= 0:
                 data.ctrl[aid] = qpos_cmd[i]
         mujoco.mj_step(model, data)
+        robot_view = renderer.render(data) if renderer is not None else None
+        if settings.record and writer is None and robot_view is not None:
+            writer = _make_writer(output_dir / "sim_tracking.mp4", (robot_view.shape[1], robot_view.shape[0]), settings.control_rate_hz)
+        if settings.show_view and robot_view is not None:
+            cv2.imshow("mujoco-servo", robot_view)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q")):
+                break
+        if writer is not None and robot_view is not None:
+            writer.write(robot_view)
         trace.append(
             {
                 "step": step,
@@ -141,6 +169,12 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
             }
         )
         step += 1
+    if renderer is not None:
+        renderer.close()
+    if writer is not None:
+        writer.release()
+    if settings.show_view:
+        cv2.destroyAllWindows()
     summary = {
         "mode": "sim",
         "prompt": settings.prompt,
@@ -166,15 +200,22 @@ def run_camera(
     model, data = bundle.model, bundle.data
     target_proto = bundle.target_proto
     camera = open_camera(settings.camera_index, width=settings.camera_width, height=settings.camera_height)
-    backend = build_backend(settings.backend, settings.prompt, target_world_position)
+    backend = build_backend(settings.backend, settings.prompt, target_world_position, config=_vision_config(settings))
     session = PerceptionSession(backend, settings.prompt)
     gains = ServoGains()
     dt = 1.0 / settings.control_rate_hz
     frame_count = 0
     trace: list[dict] = []
     writer = None
-    if settings.record:
-        writer = _make_writer(output_dir / "camera_tracking.mp4", (settings.camera_width, settings.camera_height), settings.control_rate_hz)
+    renderer = None
+    if settings.show_view or settings.record:
+        lookat = tuple(np.asarray(target_world_position(settings.prompt), dtype=float))
+        renderer = MujocoSceneRenderer(
+            model,
+            width=settings.robot_view_width,
+            height=settings.robot_view_height,
+            lookat=(lookat[0], lookat[1], lookat[2] + 0.05),
+        )
     last_good_detection: Detection | None = None
     try:
         limit = settings.max_steps if settings.run_mode == "auto" or (not settings.show_view and stop_event is None) else None
@@ -216,6 +257,7 @@ def run_camera(
                 if aid >= 0:
                     data.ctrl[aid] = qpos_cmd[i]
             mujoco.mj_step(model, data)
+            robot_view = renderer.render(data) if renderer is not None else None
             status = "tracking" if raw_detection.success else ("hold" if last_good_detection is not None else "searching")
             annotated = _overlay_status(
                 frame.image_bgr,
@@ -223,10 +265,17 @@ def run_camera(
                 telemetry,
                 title=f"{settings.mode} | {settings.run_mode} | {settings.prompt} | {status}",
             )
+            display_frame = side_by_side_view(robot_view, annotated) if robot_view is not None else annotated
+            if settings.record and writer is None:
+                writer = _make_writer(
+                    output_dir / "camera_tracking.mp4",
+                    (display_frame.shape[1], display_frame.shape[0]),
+                    settings.control_rate_hz,
+                )
             if writer is not None:
-                writer.write(annotated)
+                writer.write(display_frame)
             if settings.show_view:
-                cv2.imshow("mujoco-servo", annotated)
+                cv2.imshow("mujoco-servo", display_frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (27, ord("q")):
                     break
@@ -247,6 +296,8 @@ def run_camera(
         camera.release()
         if writer is not None:
             writer.release()
+        if renderer is not None:
+            renderer.close()
         if settings.show_view:
             cv2.destroyAllWindows()
     summary = {
@@ -258,6 +309,7 @@ def run_camera(
         "final_orientation_error_rad": trace[-1]["orientation_error_rad"] if trace else None,
         "camera_index": settings.camera_index,
         "robot": robot_spec.name,
+        "vision_preset": settings.vision_preset,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "camera_summary.json").write_text(json.dumps(summary, indent=2))

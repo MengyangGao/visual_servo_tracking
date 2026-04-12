@@ -4,9 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.config import build_settings
+from mujoco_servo.rendering import side_by_side_view
 from mujoco_servo.runtime import run_camera, run_simulation
 
 
@@ -49,7 +52,17 @@ class RuntimeSmokeTest(unittest.TestCase):
                 self.skipTest(f"camera unavailable in this environment: {exc}")
             self.assertEqual(summary["mode"], "camera")
 
+    def test_side_by_side_view_shapes(self) -> None:
+        robot = np.zeros((120, 160, 3), dtype=np.uint8)
+        camera = np.zeros((180, 240, 3), dtype=np.uint8)
+        robot[:] = (10, 20, 30)
+        camera[:] = (40, 50, 60)
+        combined = side_by_side_view(robot, camera)
+        self.assertEqual(combined.ndim, 3)
+        self.assertEqual(combined.shape[2], 3)
+        self.assertGreater(combined.shape[1], robot.shape[1] + camera.shape[1])
+        self.assertEqual(combined.dtype, np.uint8)
+
 
 if __name__ == "__main__":
     unittest.main()
-

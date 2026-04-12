@@ -11,6 +11,7 @@ from ._bootstrap import SRC  # noqa: F401
 from mujoco_servo.config import default_camera_intrinsics, target_world_position
 from mujoco_servo.perception import (
     OracleBackend,
+    GroundedSam2Config,
     PerceptionBackend,
     PerceptionSession,
     PromptGuidedVisionBackend,
@@ -106,6 +107,17 @@ class PerceptionTest(unittest.TestCase):
         with patch("mujoco_servo.perception.GroundedSam2Backend", side_effect=RuntimeError("no model")):
             backend = build_backend("grounded-sam2", "cup", target_world_position)
         self.assertEqual(backend.name, "heuristic")
+
+    def test_grounded_sam2_preset_mapping(self) -> None:
+        default = GroundedSam2Config.from_preset("default")
+        small = GroundedSam2Config.from_preset("small")
+        lite = GroundedSam2Config.from_preset("lite")
+        self.assertEqual(default.grounding_model_id, "IDEA-Research/grounding-dino-base")
+        self.assertEqual(default.sam2_checkpoint_name, "sam2.1_hiera_base_plus.pt")
+        self.assertEqual(small.grounding_model_id, "IDEA-Research/grounding-dino-tiny")
+        self.assertEqual(small.sam2_checkpoint_name, "sam2.1_hiera_small.pt")
+        self.assertEqual(lite.grounding_model_id, "IDEA-Research/grounding-dino-tiny")
+        self.assertEqual(lite.sam2_checkpoint_name, "sam2.1_hiera_tiny.pt")
 
 
 if __name__ == "__main__":

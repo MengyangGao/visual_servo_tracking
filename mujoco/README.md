@@ -14,6 +14,9 @@ This project is the new Python + MuJoCo vision-servo branch of the repo.
 - `oracle`: deterministic backend for simulation and tests
 - `heuristic`: classical prompt-guided fallback for real-camera development
 - `grounded-sam2`: open-vocabulary backend that uses Grounding DINO for text grounding and SAM 2 for segmentation when SAM 2 is available
+- `default` vision preset: `IDEA-Research/grounding-dino-base` + `facebook/sam2.1-hiera-base-plus`
+- `small` vision preset: `IDEA-Research/grounding-dino-tiny` + `facebook/sam2.1-hiera-small`
+- `lite` vision preset: `IDEA-Research/grounding-dino-tiny` + `facebook/sam2.1-hiera-tiny`
 
 If SAM 2 is not installed or the checkpoint is not configured, the backend still runs in box-mask mode so the controller remains usable.
 
@@ -54,6 +57,14 @@ For camera input:
 ```bash
 conda run -n mujoco python -m mujoco_servo camera --prompt "red cup"
 ```
+
+To reduce latency, use a lighter preset:
+
+```bash
+conda run -n mujoco python -m mujoco_servo camera --prompt "cup" --backend grounded-sam2 --vision-preset lite --run-mode manual
+```
+
+The camera mode shows the MuJoCo robot view next to the live camera frame.
 
 Use `--backend heuristic` if you want a lightweight local vision fallback without loading open-vocabulary weights.
 

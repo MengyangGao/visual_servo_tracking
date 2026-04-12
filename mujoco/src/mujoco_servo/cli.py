@@ -14,6 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
     sim = subparsers.add_parser("sim", help="run simulation")
     sim.add_argument("--prompt", default="cup")
     sim.add_argument("--backend", default="oracle")
+    sim.add_argument("--vision-preset", default="default", choices=["default", "small", "lite"])
     sim.add_argument("--steps", type=int, default=240)
     sim.add_argument("--no-view", action="store_true")
     sim.add_argument("--record", action="store_true")
@@ -21,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     cam = subparsers.add_parser("camera", help="run camera loop")
     cam.add_argument("--prompt", default="cup")
     cam.add_argument("--backend", default="auto")
+    cam.add_argument("--vision-preset", default="default", choices=["default", "small", "lite"])
     cam.add_argument("--steps", type=int, default=240)
     cam.add_argument("--camera-index", type=int, default=None)
     cam.add_argument("--mode", default="camera")
@@ -52,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=args.backend,
             mode="sim",
             run_mode="auto",
+            vision_preset=args.vision_preset,
             max_steps=args.steps,
             show_view=not args.no_view,
             record=args.record,
@@ -65,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=args.backend,
             mode=args.mode,
             run_mode=args.run_mode,
+            vision_preset=args.vision_preset,
             max_steps=args.steps,
             camera_index=args.camera_index,
             show_view=not args.no_view,

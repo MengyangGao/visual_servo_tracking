@@ -85,11 +85,14 @@ class AppSettings:
     backend: str = "auto"
     mode: str = "sim"
     run_mode: str = "auto"
+    vision_preset: str = "default"
     max_steps: int = 240
     control_rate_hz: float = 30.0
     camera_index: Optional[int] = None
     camera_width: int = 1280
     camera_height: int = 720
+    robot_view_width: int = 640
+    robot_view_height: int = 480
     show_view: bool = True
     record: bool = False
     output_dir: Path = Path("outputs")
