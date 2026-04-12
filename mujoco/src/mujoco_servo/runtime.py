@@ -20,8 +20,7 @@ from .control import ServoGains, compute_servo_command
 from .geometry import rotation_matrix_to_quaternion_wxyz
 from .perception import GroundedSam2Config, OracleBackend, PerceptionSession, build_backend
 from .robot import build_robot_spec
-from .dashboard import ThreePanelDashboardWindow
-from .rendering import MujocoSceneRenderer, ViewLayout, three_panel_view
+from .rendering import MujocoSceneRenderer, MujocoViewerSession, ViewLayout, three_panel_view
 from .scene import body_pose_world, build_scene_bundle, set_mocap_body_pose
 from .types import CameraFrame, CameraIntrinsics, CameraPose, Detection, ServoTelemetry
 
@@ -206,7 +205,7 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
     world_renderer = None
     follow_renderer = None
     sensor_renderer = None
-    dashboard = None
+    viewer_session = None
     writer = None
     if can_render:
         try:
@@ -242,11 +241,18 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
             world_renderer = None
             follow_renderer = None
             sensor_renderer = None
-    if settings.show_view and threading.current_thread() is threading.main_thread():
+    if settings.show_view and threading.current_thread() is threading.main_thread() and _can_use_mujoco_renderer():
         try:
-            dashboard = ThreePanelDashboardWindow(title="MuJoCo vision servo - simulation")
+            viewer_session = MujocoViewerSession(
+                model,
+                data,
+                lookat=_world_view_lookat(settings.prompt),
+                distance=2.9,
+                azimuth=126.0,
+                elevation=-20.0,
+            )
         except Exception:
-            dashboard = None
+            viewer_session = None
 
     current_target_world = _sim_target_position(settings.prompt, 0, dt)
     backend_name = settings.backend.strip().lower()
@@ -345,9 +351,9 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
             writer = _make_writer(output_dir / "sim_dashboard.mp4", (dashboard_frame.shape[1], dashboard_frame.shape[0]), settings.control_rate_hz)
         if writer is not None:
             writer.write(dashboard_frame)
-        if dashboard is not None:
-            dashboard.update(dashboard_frame)
-            if not dashboard.is_open():
+        if viewer_session is not None:
+            viewer_session.sync()
+            if not viewer_session.is_running():
                 break
         trace.append(
             {
@@ -371,8 +377,8 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
         sensor_renderer.close()
     if writer is not None:
         writer.release()
-    if dashboard is not None:
-        dashboard.close()
+    if viewer_session is not None:
+        viewer_session.close()
     summary = {
         "mode": "sim",
         "prompt": settings.prompt,
@@ -411,7 +417,7 @@ def run_camera(
     writer = None
     world_renderer = None
     follow_renderer = None
-    dashboard = None
+    viewer_session = None
     if (settings.show_view or settings.record) and _can_use_mujoco_renderer():
         try:
             world_renderer = MujocoSceneRenderer(
@@ -436,11 +442,18 @@ def run_camera(
             warnings.warn(f"Robot-view renderer unavailable in camera mode: {exc}", RuntimeWarning)
             world_renderer = None
             follow_renderer = None
-    if settings.show_view and threading.current_thread() is threading.main_thread():
+    if settings.show_view and threading.current_thread() is threading.main_thread() and _can_use_mujoco_renderer():
         try:
-            dashboard = ThreePanelDashboardWindow(title="MuJoCo vision servo - camera")
+            viewer_session = MujocoViewerSession(
+                model,
+                data,
+                lookat=_world_view_lookat(settings.prompt),
+                distance=2.9,
+                azimuth=126.0,
+                elevation=-20.0,
+            )
         except Exception:
-            dashboard = None
+            viewer_session = None
 
     state = _LoopState()
     hold_frames = 6
@@ -531,9 +544,9 @@ def run_camera(
                 )
             if writer is not None:
                 writer.write(display_frame)
-            if dashboard is not None:
-                dashboard.update(display_frame)
-                if not dashboard.is_open():
+            if viewer_session is not None:
+                viewer_session.sync()
+                if not viewer_session.is_running():
                     break
             trace.append(
                 {
@@ -559,8 +572,8 @@ def run_camera(
             world_renderer.close()
         if follow_renderer is not None:
             follow_renderer.close()
-    if dashboard is not None:
-        dashboard.close()
+    if viewer_session is not None:
+        viewer_session.close()
     summary = {
         "mode": "camera",
         "prompt": settings.prompt,
