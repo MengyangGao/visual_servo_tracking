@@ -64,7 +64,8 @@ To reduce latency, use a lighter preset:
 conda run -n mujoco python -m mujoco_servo camera --prompt "cup" --backend grounded-sam2 --vision-preset lite --run-mode manual
 ```
 
-The camera mode opens the official MuJoCo viewer for the robot scene and keeps the live camera frame in a separate window.
+On macOS, run camera mode with `mjpython` so the official MuJoCo viewer can launch.
+The robot scene uses the MuJoCo viewer, and the live camera frame is shown in a Tk preview window instead of OpenCV highgui.
 
 Use `--backend heuristic` if you want a lightweight local vision fallback without loading open-vocabulary weights.
 

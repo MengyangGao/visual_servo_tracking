@@ -4,11 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import mujoco
 import numpy as np
 
 from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.config import build_settings
+from mujoco_servo.robot import build_robot_spec
+from mujoco_servo.scene import build_scene_bundle, set_mocap_body_pose
 from mujoco_servo.rendering import side_by_side_view
 from mujoco_servo.runtime import run_camera, run_simulation
 
@@ -62,6 +65,14 @@ class RuntimeSmokeTest(unittest.TestCase):
         self.assertEqual(combined.shape[2], 3)
         self.assertGreater(combined.shape[1], robot.shape[1] + camera.shape[1])
         self.assertEqual(combined.dtype, np.uint8)
+
+    def test_scene_contains_visible_mocap_markers(self) -> None:
+        spec = build_robot_spec(prefer_reference=False)
+        bundle = build_scene_bundle(spec, "apple", 640, 480)
+        for body_name in ("vision_camera", "vision_target", "vision_ee"):
+            body_id = mujoco.mj_name2id(bundle.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            self.assertGreaterEqual(body_id, 0)
+            self.assertTrue(set_mocap_body_pose(bundle.model, bundle.data, body_name, np.array([0.1, 0.2, 0.3]), np.eye(3)))
 
 
 if __name__ == "__main__":

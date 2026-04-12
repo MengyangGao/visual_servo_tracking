@@ -84,6 +84,9 @@ class MujocoSceneRenderer:
         frame = self._renderer.render()
         return _ensure_bgr(frame)
 
+    def set_lookat(self, lookat: tuple[float, float, float]) -> None:
+        self._camera.lookat[:] = np.array(lookat, dtype=float)
+
     def close(self) -> None:
         self._renderer.close()
 
@@ -99,10 +102,13 @@ class MujocoViewerSession:
         elevation: float = -20.0,
     ) -> None:
         self._handle = mujoco_viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False)
-        self._handle.cam.lookat[:] = np.array(lookat, dtype=float)
+        self.set_lookat(lookat)
         self._handle.cam.distance = float(distance)
         self._handle.cam.azimuth = float(azimuth)
         self._handle.cam.elevation = float(elevation)
+
+    def set_lookat(self, lookat: tuple[float, float, float]) -> None:
+        self._handle.cam.lookat[:] = np.array(lookat, dtype=float)
 
     def sync(self) -> None:
         self._handle.sync()

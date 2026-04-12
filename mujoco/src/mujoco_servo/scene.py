@@ -56,11 +56,22 @@ def _target_marker_xml(proto: TargetPrototype) -> str:
     ).strip()
 
 
+def _ee_marker_xml() -> str:
+    return dedent(
+        """
+        <body name="vision_ee" mocap="true" pos="0.30 -0.10 0.45">
+          <geom type="sphere" size="0.016" rgba="0.10 0.80 1.00 0.95"/>
+          <site name="vision_ee_site" pos="0 0 0" size="0.008" rgba="1 1 1 1"/>
+        </body>
+        """
+    ).strip()
+
+
 def _inject_target(xml_text: str, proto: TargetPrototype, target_name: str = "target") -> str:
     marker = "</worldbody>"
     if marker not in xml_text:
         raise ValueError("scene XML is missing a worldbody closing tag")
-    marker_block = "\n  ".join([_target_body_xml(proto, target_name), _camera_marker_xml(), _target_marker_xml(proto)])
+    marker_block = "\n  ".join([_target_body_xml(proto, target_name), _camera_marker_xml(), _target_marker_xml(proto), _ee_marker_xml()])
     return xml_text.replace(marker, f"{marker_block}\n  {marker}", 1)
 
 
@@ -131,7 +142,10 @@ def _fallback_scene_xml(proto: TargetPrototype) -> str:
           </keyframe>
         </mujoco>
         """
-    ).replace("</worldbody>", f"{target}\n          {_camera_marker_xml()}\n          {_target_marker_xml(proto)}\n          </worldbody>")
+    ).replace(
+        "</worldbody>",
+        f"{target}\n          {_camera_marker_xml()}\n          {_target_marker_xml(proto)}\n          {_ee_marker_xml()}\n          </worldbody>",
+    )
 
 
 def build_scene_xml(robot_spec: RobotSpec, prompt: str) -> str:

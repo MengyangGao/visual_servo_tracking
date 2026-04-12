@@ -10,12 +10,13 @@ import mujoco
 import numpy as np
 
 from .camera import discover_cameras, open_camera
-from .config import AppSettings, build_settings, target_world_position
+from .config import AppSettings, build_settings, canonical_camera_pose, target_world_position
 from .config import project_root
 from .control import ServoGains, compute_servo_command
 from .geometry import rotation_matrix_to_quaternion_wxyz
 from .perception import GroundedSam2Config, OracleBackend, PerceptionSession, build_backend
 from .robot import build_robot_spec
+from .preview import CameraPreviewWindow
 from .rendering import MujocoSceneRenderer, MujocoViewerSession, side_by_side_view
 from .scene import body_pose_world, build_scene_bundle, set_mocap_body_pose
 from .types import CameraFrame, CameraIntrinsics, CameraPose, Detection, ServoTelemetry
@@ -55,7 +56,14 @@ def _resolve_output_dir(settings: AppSettings) -> Path:
 
 
 def _camera_pose_for_real_mode() -> CameraPose:
-    return CameraPose.identity()
+    return canonical_camera_pose()
+
+
+def _focus_point_from(telemetry: ServoTelemetry, ee_position: np.ndarray) -> tuple[float, float, float]:
+    focus = 0.5 * (np.asarray(telemetry.target_position_m, dtype=float).reshape(3) + np.asarray(ee_position, dtype=float).reshape(3))
+    focus = focus.copy()
+    focus[2] += 0.05
+    return tuple(float(v) for v in focus)
 
 
 def _camera_intrinsics_for_frame(frame: np.ndarray) -> CameraIntrinsics:
@@ -156,9 +164,15 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
             if aid >= 0:
                 data.ctrl[aid] = qpos_cmd[i]
         mujoco.mj_step(model, data)
+        ee_pos, ee_rot = body_pose_world(model, data, bundle.ee_body_name)
         set_mocap_body_pose(model, data, "vision_camera", bundle.camera_pose.translation_m, bundle.camera_pose.rotation_world_from_cam)
         set_mocap_body_pose(model, data, "vision_target", telemetry.target_position_m)
+        set_mocap_body_pose(model, data, "vision_ee", ee_pos, ee_rot)
+        focus_point = _focus_point_from(telemetry, ee_pos)
+        if renderer is not None:
+            renderer.set_lookat(focus_point)
         if viewer is not None:
+            viewer.set_lookat(focus_point)
             viewer.sync()
             if not viewer.is_running():
                 break
@@ -184,8 +198,6 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
         viewer.close()
     if writer is not None:
         writer.release()
-    if settings.show_view:
-        cv2.destroyAllWindows()
     summary = {
         "mode": "sim",
         "prompt": settings.prompt,
@@ -220,6 +232,7 @@ def run_camera(
     writer = None
     renderer = None
     viewer = None
+    camera_preview: CameraPreviewWindow | None = None
     if settings.show_view or settings.record:
         lookat = tuple(np.asarray(target_world_position(settings.prompt), dtype=float))
         renderer = MujocoSceneRenderer(
@@ -235,6 +248,11 @@ def run_camera(
             data,
             lookat=(lookat[0], lookat[1], lookat[2] + 0.05),
         )
+        if threading.current_thread() is threading.main_thread():
+            try:
+                camera_preview = CameraPreviewWindow(title="mujoco-servo camera")
+            except Exception:
+                camera_preview = None
     last_good_detection: Detection | None = None
     try:
         limit = settings.max_steps if settings.run_mode == "auto" or (not settings.show_view and stop_event is None) else None
@@ -276,9 +294,15 @@ def run_camera(
                 if aid >= 0:
                     data.ctrl[aid] = qpos_cmd[i]
             mujoco.mj_step(model, data)
+            ee_pos, ee_rot = body_pose_world(model, data, bundle.ee_body_name)
             set_mocap_body_pose(model, data, "vision_camera", bundle.camera_pose.translation_m, bundle.camera_pose.rotation_world_from_cam)
             set_mocap_body_pose(model, data, "vision_target", telemetry.target_position_m)
+            set_mocap_body_pose(model, data, "vision_ee", ee_pos, ee_rot)
+            focus_point = _focus_point_from(telemetry, ee_pos)
+            if renderer is not None:
+                renderer.set_lookat(focus_point)
             if viewer is not None:
+                viewer.set_lookat(focus_point)
                 viewer.sync()
                 if not viewer.is_running():
                     break
@@ -299,10 +323,9 @@ def run_camera(
                 )
             if writer is not None:
                 writer.write(display_frame)
-            if settings.show_view:
-                cv2.imshow("mujoco-servo", display_frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (27, ord("q")):
+            if camera_preview is not None:
+                camera_preview.update(display_frame)
+                if not camera_preview.is_open():
                     break
             trace.append(
                 {
@@ -323,10 +346,10 @@ def run_camera(
             writer.release()
         if renderer is not None:
             renderer.close()
-        if viewer is not None:
-            viewer.close()
-        if settings.show_view:
-            cv2.destroyAllWindows()
+    if viewer is not None:
+        viewer.close()
+        if camera_preview is not None:
+            camera_preview.close()
     summary = {
         "mode": "camera",
         "prompt": settings.prompt,
