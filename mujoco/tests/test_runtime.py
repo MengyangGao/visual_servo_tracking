@@ -15,7 +15,7 @@ from mujoco_servo.config import moving_target_world_position
 from mujoco_servo.types import Detection
 from mujoco_servo.robot import build_robot_spec
 from mujoco_servo.scene import build_scene_bundle, set_mocap_body_pose
-from mujoco_servo.rendering import side_by_side_view
+from mujoco_servo.rendering import side_by_side_view, three_panel_view
 from mujoco_servo.runtime import run_camera, run_simulation
 
 
@@ -70,6 +70,22 @@ class RuntimeSmokeTest(unittest.TestCase):
         self.assertEqual(combined.shape[2], 3)
         self.assertGreater(combined.shape[1], robot.shape[1] + camera.shape[1])
         self.assertEqual(combined.dtype, np.uint8)
+
+    def test_three_panel_view_shapes(self) -> None:
+        world = np.zeros((140, 200, 3), dtype=np.uint8)
+        follow = np.zeros((100, 180, 3), dtype=np.uint8)
+        camera = np.zeros((160, 240, 3), dtype=np.uint8)
+        dashboard = three_panel_view(
+            world,
+            follow,
+            camera,
+            footer_lines=["prompt=cup", "backend=oracle"],
+        )
+        self.assertEqual(dashboard.ndim, 3)
+        self.assertEqual(dashboard.shape[2], 3)
+        self.assertGreater(dashboard.shape[1], world.shape[1] + follow.shape[1] + camera.shape[1])
+        self.assertGreater(dashboard.shape[0], world.shape[0])
+        self.assertEqual(dashboard.dtype, np.uint8)
 
     def test_scene_contains_visible_mocap_markers(self) -> None:
         spec = build_robot_spec(prefer_reference=False)

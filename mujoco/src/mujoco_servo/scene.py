@@ -37,7 +37,7 @@ def _camera_marker_xml() -> str:
     return dedent(
         """
         <body name="vision_camera" mocap="true" pos="0.18 -0.95 0.82">
-          <geom type="box" size="0.045 0.03 0.03" rgba="0.20 0.62 1.00 0.88"/>
+          <geom type="box" size="0.058 0.038 0.038" rgba="0.20 0.62 1.00 0.90"/>
           <site name="vision_camera_site" pos="0 0 0" size="0.01" rgba="1 1 1 1"/>
         </body>
         """
@@ -49,7 +49,7 @@ def _target_marker_xml(proto: TargetPrototype) -> str:
     return dedent(
         f"""
         <body name="vision_target" mocap="true" pos="{target_world_position(proto.name)[0]:.4f} {target_world_position(proto.name)[1]:.4f} {target_world_position(proto.name)[2]:.4f}">
-          <geom type="sphere" size="{max(size) * 0.22:.4f}" rgba="1.00 0.20 0.20 0.92"/>
+          <geom type="sphere" size="{max(size) * 0.30:.4f}" rgba="1.00 0.20 0.20 0.94"/>
           <site name="vision_target_site" pos="0 0 0" size="0.008" rgba="1 1 1 1"/>
         </body>
         """
@@ -60,8 +60,8 @@ def _ee_marker_xml() -> str:
     return dedent(
         """
         <body name="vision_ee" mocap="true" pos="0.30 -0.10 0.45">
-          <geom type="sphere" size="0.024" rgba="0.10 0.80 1.00 0.98"/>
-          <geom type="box" size="0.014 0.010 0.006" pos="0.024 0 0" rgba="0.05 0.35 1.00 0.95"/>
+          <geom type="sphere" size="0.030" rgba="0.10 0.80 1.00 0.98"/>
+          <geom type="box" size="0.020 0.014 0.008" pos="0.032 0 0" rgba="0.05 0.35 1.00 0.96"/>
           <site name="vision_ee_site" pos="0 0 0" size="0.008" rgba="1 1 1 1"/>
         </body>
         """

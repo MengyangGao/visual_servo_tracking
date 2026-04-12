@@ -10,6 +10,7 @@ This branch is the Python + MuJoCo rebuild of the vision-servo project.
 - Uses image-space corners plus a standoff pose target, so the end-effector stays facing the target at roughly 30 cm.
 - Supports simulation and real-camera modes with the same controller.
 - Supports `oracle`, `heuristic`, and `grounded-sam2` perception backends.
+- Shows a three-panel dashboard with the MuJoCo world scene, a robot follow view, and the camera / detection view.
 
 ## Perception backends
 
@@ -61,13 +62,21 @@ Real-camera mode:
 mjpython -m mujoco_servo camera --prompt "cup" --backend grounded-sam2 --vision-preset lite --run-mode manual
 ```
 
-The camera mode uses the system camera and the fixed MuJoCo world viewer. The robot view follows the end-effector and the detected target so motion stays visible.
+On macOS, use `mjpython` when you want the MuJoCo panels to render in real time. The dashboard shows three panels:
+
+- `MuJoCo world`: full scene view
+- `Robot follow`: zoomed view centered on the end-effector and the target
+- `Camera / detection`: the system camera or the simulated sensor view with detection overlays
+
+Use `--run-mode auto` for a fixed-length run and `--run-mode manual` when you want Start/Stop control from the GUI path.
 
 GUI:
 
 ```bash
 conda run -n mujoco python -m mujoco_servo gui
 ```
+
+The GUI is a control launcher. The three-panel dashboard is shown by the `sim` and `camera` commands when `--no-view` is not set.
 
 List available cameras:
 
@@ -80,4 +89,5 @@ conda run -n mujoco python -m mujoco_servo cameras
 - The controller uses image corners, filtered detections, and a standoff pose target.
 - The simulation target moves continuously so the follow behavior is easy to see.
 - On macOS, camera access still depends on system permission prompts.
+- The dashboard recordings are written as `sim_dashboard.mp4` and `camera_dashboard.mp4` when `--record` is set.
 - If the live camera path is unavailable, the simulation path remains the primary regression test.

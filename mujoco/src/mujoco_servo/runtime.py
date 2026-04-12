@@ -20,8 +20,8 @@ from .control import ServoGains, compute_servo_command
 from .geometry import rotation_matrix_to_quaternion_wxyz
 from .perception import GroundedSam2Config, OracleBackend, PerceptionSession, build_backend
 from .robot import build_robot_spec
-from .preview import CameraPreviewWindow
-from .rendering import MujocoSceneRenderer, MujocoViewerSession, ViewLayout, side_by_side_view
+from .dashboard import ThreePanelDashboardWindow
+from .rendering import MujocoSceneRenderer, ViewLayout, three_panel_view
 from .scene import body_pose_world, build_scene_bundle, set_mocap_body_pose
 from .types import CameraFrame, CameraIntrinsics, CameraPose, Detection, ServoTelemetry
 
@@ -91,6 +91,19 @@ def _tracking_lookat(ee_pos: np.ndarray, target_pos: np.ndarray) -> tuple[float,
     return float(mid[0]), float(mid[1]), float(mid[2])
 
 
+def _world_panel_lookat(prompt: str) -> tuple[float, float, float]:
+    target = np.asarray(target_world_position(prompt), dtype=float)
+    return float(target[0] - 0.05), float(target[1] - 0.25), float(target[2] + 0.22)
+
+
+def _camera_panel_lookat(prompt: str, target_pos: np.ndarray) -> tuple[float, float, float]:
+    target = np.asarray(target_pos, dtype=float).reshape(3)
+    nominal = np.asarray(target_world_position(prompt), dtype=float)
+    mid = 0.65 * target + 0.35 * nominal
+    mid[2] = float(mid[2] + 0.18)
+    return float(mid[0]), float(mid[1]), float(mid[2])
+
+
 def _sim_target_position(prompt: str, step: int, dt: float) -> np.ndarray:
     return moving_target_world_position(prompt, step * dt)
 
@@ -142,15 +155,6 @@ def _world_view_lookat(prompt: str) -> tuple[float, float, float]:
     return float(target[0]), float(target[1]), float(target[2] + 0.18)
 
 
-def _should_open_camera_preview() -> bool:
-    forced = os.getenv("MUJOCO_SERVO_ENABLE_TK_PREVIEW", "").strip().lower()
-    if forced in {"1", "true", "yes", "on"}:
-        return True
-    if forced in {"0", "false", "no", "off"}:
-        return False
-    return sys.platform != "darwin"
-
-
 def _can_use_mujoco_renderer() -> bool:
     forced = os.getenv("MUJOCO_SERVO_FORCE_RENDERER", "").strip().lower()
     if forced in {"1", "true", "yes", "on"}:
@@ -197,46 +201,61 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
     gains = ServoGains()
     state = _LoopState()
     trace: list[dict] = []
-    need_renderer = (
-        (settings.show_view or settings.record or settings.backend.strip().lower() not in {"oracle", "simulation", "sim"})
-        and _can_use_mujoco_renderer()
-    )
-    renderer = None
-    viewer = None
+    need_renderer = (settings.show_view or settings.record or settings.backend.strip().lower() not in {"oracle", "simulation", "sim"})
+    can_render = need_renderer and _can_use_mujoco_renderer()
+    world_renderer = None
+    follow_renderer = None
+    sensor_renderer = None
+    dashboard = None
     writer = None
-    if need_renderer:
+    if can_render:
         try:
-            renderer = MujocoSceneRenderer(
+            world_renderer = MujocoSceneRenderer(
                 model,
                 width=settings.robot_view_width,
                 height=settings.robot_view_height,
-                lookat=(float(ee_start_pos[0]), float(ee_start_pos[1]), float(ee_start_pos[2] + 0.10)),
-                distance=1.5,
+                lookat=_world_view_lookat(settings.prompt),
+                distance=2.9,
+                azimuth=126.0,
+                elevation=-20.0,
+            )
+            follow_renderer = MujocoSceneRenderer(
+                model,
+                width=settings.robot_view_width,
+                height=settings.robot_view_height,
+                lookat=_tracking_lookat(ee_start_pos, target_world_position(settings.prompt)),
+                distance=1.65,
                 azimuth=150.0,
+                elevation=-16.0,
+            )
+            sensor_renderer = MujocoSceneRenderer(
+                model,
+                width=settings.camera_width,
+                height=settings.camera_height,
+                lookat=_camera_panel_lookat(settings.prompt, target_world_position(settings.prompt)),
+                distance=1.45,
+                azimuth=138.0,
                 elevation=-18.0,
             )
         except Exception as exc:  # noqa: BLE001
             warnings.warn(f"Robot-view renderer unavailable, falling back to oracle-style simulation: {exc}", RuntimeWarning)
-            renderer = None
-    if settings.show_view:
-        viewer = MujocoViewerSession(
-            model,
-            data,
-            lookat=_world_view_lookat(settings.prompt),
-            distance=2.6,
-            azimuth=128.0,
-            elevation=-22.0,
-        )
+            world_renderer = None
+            follow_renderer = None
+            sensor_renderer = None
+    if settings.show_view and threading.current_thread() is threading.main_thread():
+        try:
+            dashboard = ThreePanelDashboardWindow(title="MuJoCo vision servo - simulation")
+        except Exception:
+            dashboard = None
 
     current_target_world = _sim_target_position(settings.prompt, 0, dt)
     backend_name = settings.backend.strip().lower()
-    if renderer is None and backend_name not in {"oracle", "simulation", "sim"}:
+    if sensor_renderer is None and backend_name not in {"oracle", "simulation", "sim"}:
         backend = OracleBackend(lambda _prompt: current_target_world.copy())
     else:
         backend = build_backend(settings.backend, settings.prompt, lambda _prompt: current_target_world.copy(), config=_vision_config(settings))
     session = PerceptionSession(backend, settings.prompt)
     hold_frames = 6
-    last_rendered_frame: np.ndarray | None = None
     limit = settings.max_steps
     step = 0
     while step < limit:
@@ -246,14 +265,12 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
         set_mocap_body_pose(model, data, "target", current_target_world)
         mujoco.mj_forward(model, data)
         ee_pos, ee_rot = body_pose_world(model, data, bundle.ee_body_name)
-        if renderer is not None:
-            renderer.set_distance(float(np.clip(1.25 + 1.8 * np.linalg.norm(current_target_world - ee_pos), 1.4, 2.4)))
-            robot_lookat = _tracking_lookat(ee_pos, current_target_world)
-            frame = renderer.render_with_lookat(data, robot_lookat)
-            last_rendered_frame = frame
+        if sensor_renderer is not None:
+            sensor_renderer.set_distance(float(np.clip(1.20 + 1.5 * np.linalg.norm(current_target_world - ee_pos), 1.25, 2.3)))
+            sensor_frame = sensor_renderer.render_with_lookat(data, _camera_panel_lookat(settings.prompt, current_target_world))
         else:
-            frame = np.zeros((settings.camera_height, settings.camera_width, 3), dtype=np.uint8)
-        raw_detection = session.update(frame, bundle.camera_intrinsics, bundle.camera_pose)
+            sensor_frame = np.zeros((settings.camera_height, settings.camera_width, 3), dtype=np.uint8)
+        raw_detection = session.update(sensor_frame, bundle.camera_intrinsics, bundle.camera_pose)
         if raw_detection.success:
             state.missing_frames = 0
             state.filtered_detection = raw_detection if state.filtered_detection is None else _smooth_detection(state.filtered_detection, raw_detection)
@@ -298,18 +315,40 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
         set_mocap_body_pose(model, data, "vision_target", current_target_world)
         set_mocap_body_pose(model, data, "vision_ee", ee_pos, ee_rot)
         mujoco.mj_forward(model, data)
-        if viewer is not None:
-            viewer.sync()
-            if not viewer.is_running():
-                break
-        if renderer is not None:
-            robot_view = renderer.render_with_lookat(data, _tracking_lookat(ee_pos, current_target_world))
+        world_view = world_renderer.render_with_lookat(data, _world_view_lookat(settings.prompt)) if world_renderer is not None else None
+        if follow_renderer is not None:
+            follow_renderer.set_distance(float(np.clip(1.00 + 1.35 * np.linalg.norm(current_target_world - ee_pos), 1.10, 2.05)))
+            follow_view = follow_renderer.render_with_lookat(data, _tracking_lookat(ee_pos, current_target_world))
         else:
-            robot_view = last_rendered_frame
-        if settings.record and writer is None and robot_view is not None:
-            writer = _make_writer(output_dir / "sim_tracking.mp4", (robot_view.shape[1], robot_view.shape[0]), settings.control_rate_hz)
-        if writer is not None and robot_view is not None:
-            writer.write(robot_view)
+            follow_view = None
+        status = "tracking" if raw_detection.success else ("hold" if state.filtered_detection is not None else "searching")
+        annotated_sensor = _overlay_status(
+            sensor_frame,
+            control_detection or raw_detection,
+            telemetry,
+            title=f"sim | auto | {settings.prompt} | {status}",
+        )
+        footer_lines = [
+            f"backend={backend.name} prompt={settings.prompt} mode=sim control=continuous",
+            f"score={telemetry.detection_score:.2f} feat={telemetry.feature_error_px:.1f}px dist={telemetry.target_distance_m:.3f}m standoff={telemetry.standoff_error_m:.3f}m",
+            "legend: world=full scene | follow=robot-centered | camera=sensor view",
+            "markers: blue=camera | red=target estimate | cyan=ee | orange=object",
+        ]
+        dashboard_frame = three_panel_view(
+            world_view,
+            follow_view,
+            annotated_sensor,
+            layout=ViewLayout(world_title="MuJoCo world", robot_title="Robot follow", camera_title="Sensor / detection"),
+            footer_lines=footer_lines,
+        )
+        if settings.record and writer is None:
+            writer = _make_writer(output_dir / "sim_dashboard.mp4", (dashboard_frame.shape[1], dashboard_frame.shape[0]), settings.control_rate_hz)
+        if writer is not None:
+            writer.write(dashboard_frame)
+        if dashboard is not None:
+            dashboard.update(dashboard_frame)
+            if not dashboard.is_open():
+                break
         trace.append(
             {
                 "step": step,
@@ -324,12 +363,16 @@ def run_simulation(settings: AppSettings, stop_event: Optional[threading.Event] 
             }
         )
         step += 1
-    if renderer is not None:
-        renderer.close()
-    if viewer is not None:
-        viewer.close()
+    if world_renderer is not None:
+        world_renderer.close()
+    if follow_renderer is not None:
+        follow_renderer.close()
+    if sensor_renderer is not None:
+        sensor_renderer.close()
     if writer is not None:
         writer.release()
+    if dashboard is not None:
+        dashboard.close()
     summary = {
         "mode": "sim",
         "prompt": settings.prompt,
@@ -366,37 +409,38 @@ def run_camera(
     frame_count = 0
     trace: list[dict] = []
     writer = None
-    renderer = None
-    viewer = None
-    camera_preview: CameraPreviewWindow | None = None
+    world_renderer = None
+    follow_renderer = None
+    dashboard = None
     if (settings.show_view or settings.record) and _can_use_mujoco_renderer():
         try:
-            renderer = MujocoSceneRenderer(
+            world_renderer = MujocoSceneRenderer(
                 model,
                 width=settings.robot_view_width,
                 height=settings.robot_view_height,
-                lookat=(float(ee_start_pos[0]), float(ee_start_pos[1]), float(ee_start_pos[2] + 0.12)),
-                distance=1.6,
-                azimuth=160.0,
-                elevation=-18.0,
+                lookat=_world_view_lookat(settings.prompt),
+                distance=2.9,
+                azimuth=126.0,
+                elevation=-20.0,
+            )
+            follow_renderer = MujocoSceneRenderer(
+                model,
+                width=settings.robot_view_width,
+                height=settings.robot_view_height,
+                lookat=_tracking_lookat(ee_start_pos, target_world_position(settings.prompt)),
+                distance=1.65,
+                azimuth=150.0,
+                elevation=-16.0,
             )
         except Exception as exc:  # noqa: BLE001
             warnings.warn(f"Robot-view renderer unavailable in camera mode: {exc}", RuntimeWarning)
-            renderer = None
-    if settings.show_view:
-        viewer = MujocoViewerSession(
-            model,
-            data,
-            lookat=_world_view_lookat(settings.prompt),
-            distance=2.6,
-            azimuth=128.0,
-            elevation=-22.0,
-        )
-        if threading.current_thread() is threading.main_thread() and _should_open_camera_preview():
-            try:
-                camera_preview = CameraPreviewWindow(title="mujoco-servo camera")
-            except Exception:
-                camera_preview = None
+            world_renderer = None
+            follow_renderer = None
+    if settings.show_view and threading.current_thread() is threading.main_thread():
+        try:
+            dashboard = ThreePanelDashboardWindow(title="MuJoCo vision servo - camera")
+        except Exception:
+            dashboard = None
 
     state = _LoopState()
     hold_frames = 6
@@ -453,15 +497,12 @@ def run_camera(
             set_mocap_body_pose(model, data, "vision_target", telemetry.target_position_m)
             set_mocap_body_pose(model, data, "vision_ee", ee_pos, ee_rot)
             mujoco.mj_forward(model, data)
-            if viewer is not None:
-                viewer.sync()
-                if not viewer.is_running():
-                    break
-            if renderer is not None:
-                renderer.set_distance(float(np.clip(1.25 + 1.8 * np.linalg.norm(telemetry.target_position_m - ee_pos), 1.4, 2.4)))
-                robot_view = renderer.render_with_lookat(data, _tracking_lookat(ee_pos, telemetry.target_position_m))
+            world_view = world_renderer.render_with_lookat(data, _world_view_lookat(settings.prompt)) if world_renderer is not None else None
+            if follow_renderer is not None:
+                follow_renderer.set_distance(float(np.clip(1.00 + 1.35 * np.linalg.norm(telemetry.target_position_m - ee_pos), 1.10, 2.05)))
+                follow_view = follow_renderer.render_with_lookat(data, _tracking_lookat(ee_pos, telemetry.target_position_m))
             else:
-                robot_view = None
+                follow_view = None
             status = "tracking" if raw_detection.success else ("hold" if state.filtered_detection is not None else "searching")
             annotated = _overlay_status(
                 frame.image_bgr,
@@ -469,19 +510,30 @@ def run_camera(
                 telemetry,
                 title=f"{settings.mode} | {settings.run_mode} | {settings.prompt} | {status}",
             )
-            display_layout = ViewLayout(robot_title="MuJoCo follow", camera_title="Real camera")
-            display_frame = side_by_side_view(robot_view, annotated, layout=display_layout) if robot_view is not None else annotated
+            footer_lines = [
+                f"backend={backend.name} prompt={settings.prompt} mode=camera control=continuous",
+                f"camera={frame.device_index}:{frame.backend_name} score={telemetry.detection_score:.2f} feat={telemetry.feature_error_px:.1f}px dist={telemetry.target_distance_m:.3f}m stand={telemetry.standoff_error_m:.3f}m",
+                "legend: world=full scene | follow=robot-centered | camera=real sensor",
+                "markers: blue=camera | red=target estimate | cyan=ee | orange=object",
+            ]
+            display_frame = three_panel_view(
+                world_view,
+                follow_view,
+                annotated,
+                layout=ViewLayout(world_title="MuJoCo world", robot_title="Robot follow", camera_title="Camera / detection"),
+                footer_lines=footer_lines,
+            )
             if settings.record and writer is None:
                 writer = _make_writer(
-                    output_dir / "camera_tracking.mp4",
+                    output_dir / "camera_dashboard.mp4",
                     (display_frame.shape[1], display_frame.shape[0]),
                     settings.control_rate_hz,
                 )
             if writer is not None:
                 writer.write(display_frame)
-            if camera_preview is not None:
-                camera_preview.update(display_frame)
-                if not camera_preview.is_open():
+            if dashboard is not None:
+                dashboard.update(display_frame)
+                if not dashboard.is_open():
                     break
             trace.append(
                 {
@@ -503,12 +555,12 @@ def run_camera(
         camera.release()
         if writer is not None:
             writer.release()
-        if renderer is not None:
-            renderer.close()
-    if viewer is not None:
-        viewer.close()
-        if camera_preview is not None:
-            camera_preview.close()
+        if world_renderer is not None:
+            world_renderer.close()
+        if follow_renderer is not None:
+            follow_renderer.close()
+    if dashboard is not None:
+        dashboard.close()
     summary = {
         "mode": "camera",
         "prompt": settings.prompt,
