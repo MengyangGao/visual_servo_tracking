@@ -79,20 +79,23 @@ title(ax1, 'ChArUco board and camera path');
 xlabel(ax1, 'X (m)');
 ylabel(ax1, 'Y (m)');
 zlabel(ax1, 'Z (m)');
-patch(ax1, 'XData', board.boardCornersWorld(:, 1), 'YData', board.boardCornersWorld(:, 2), 'ZData', board.boardCornersWorld(:, 3), ...
+hBoard = patch(ax1, 'XData', board.boardCornersWorld(:, 1), 'YData', board.boardCornersWorld(:, 2), 'ZData', board.boardCornersWorld(:, 3), ...
     'FaceColor', [0.92 0.92 0.97], 'FaceAlpha', 0.65, 'EdgeColor', [0.35 0.35 0.5], 'LineWidth', 1.2);
-plot3(ax1, board.worldPoints3DCalib(:, 1), board.worldPoints3DCalib(:, 2), board.worldPoints3DCalib(:, 3), 'k.', 'MarkerSize', 9);
-plot3(ax1, cameraPosHistory(:, 1), cameraPosHistory(:, 2), cameraPosHistory(:, 3), '-or', 'LineWidth', 1.5, 'MarkerFaceColor', 'r');
+hCorners = plot3(ax1, board.worldPoints3DCalib(:, 1), board.worldPoints3DCalib(:, 2), board.worldPoints3DCalib(:, 3), 'k.', 'MarkerSize', 9);
+hPath = plot3(ax1, cameraPosHistory(:, 1), cameraPosHistory(:, 2), cameraPosHistory(:, 3), '-or', 'LineWidth', 1.5, 'MarkerFaceColor', 'r');
 for i = 1:numViews
     plot3(ax1, [cameraPosHistory(i, 1), cfg.calibration.lookAtTarget(1)], ...
         [cameraPosHistory(i, 2), cfg.calibration.lookAtTarget(2)], ...
         [cameraPosHistory(i, 3), cfg.calibration.lookAtTarget(3)], ...
-        '-', 'Color', [0.55 0.55 0.55]);
+        '-', 'Color', [0.55 0.55 0.55], 'HandleVisibility', 'off');
 end
 draw_camera_frame(ax1, cameraPoses(:, :, 1), 0.035, 'start', 1.6);
 draw_camera_frame(ax1, cameraPoses(:, :, end), 0.035, 'end', 1.6);
 apply_world_view(ax1, cfg, cfg.scene);
-legend(ax1, {'Board plane', 'ChArUco corners', 'Camera path'}, 'Location', 'best');
+lgd1 = legend(ax1, [hBoard, hCorners, hPath], {'Board plane', 'ChArUco corners', 'Camera path'}, ...
+    'Location', 'southoutside', 'Orientation', 'horizontal', 'NumColumns', 3);
+set(lgd1, 'AutoUpdate', 'off');
+legend(ax1, 'boxoff');
 axis(ax1, [cfg.scene.tableX, cfg.scene.tableY, -0.02, 0.85]);
 apply_axes_theme(ax1, 'plot');
 
@@ -131,17 +134,17 @@ if cfg.saveVideos
         ylabel(ax1, 'Y (m)');
         zlabel(ax1, 'Z (m)');
         title(ax1, sprintf('ChArUco calibration view %d / %d', i, numViews));
-        patch(ax1, 'XData', board.boardCornersWorld(:, 1), 'YData', board.boardCornersWorld(:, 2), 'ZData', board.boardCornersWorld(:, 3), ...
+        hBoard = patch(ax1, 'XData', board.boardCornersWorld(:, 1), 'YData', board.boardCornersWorld(:, 2), 'ZData', board.boardCornersWorld(:, 3), ...
             'FaceColor', [0.92 0.92 0.97], 'FaceAlpha', 0.65, 'EdgeColor', [0.35 0.35 0.5], 'LineWidth', 1.2);
-        plot3(ax1, board.worldPoints3DCalib(:, 1), board.worldPoints3DCalib(:, 2), board.worldPoints3DCalib(:, 3), 'k.', 'MarkerSize', 9);
-        plot3(ax1, cameraPosHistory(1:i, 1), cameraPosHistory(1:i, 2), cameraPosHistory(1:i, 3), '-or', 'LineWidth', 1.5, 'MarkerFaceColor', 'r');
-        plot3(ax1, cameraPosHistory(i, 1), cameraPosHistory(i, 2), cameraPosHistory(i, 3), 'rp', 'MarkerSize', 14, 'MarkerFaceColor', 'r');
+        hCorners = plot3(ax1, board.worldPoints3DCalib(:, 1), board.worldPoints3DCalib(:, 2), board.worldPoints3DCalib(:, 3), 'k.', 'MarkerSize', 9);
+        hPath = plot3(ax1, cameraPosHistory(1:i, 1), cameraPosHistory(1:i, 2), cameraPosHistory(1:i, 3), '-or', 'LineWidth', 1.5, 'MarkerFaceColor', 'r');
+        plot3(ax1, cameraPosHistory(i, 1), cameraPosHistory(i, 2), cameraPosHistory(i, 3), 'rp', 'MarkerSize', 14, 'MarkerFaceColor', 'r', 'HandleVisibility', 'off');
         plot3(ax1, [cameraPosHistory(i, 1), cfg.calibration.lookAtTarget(1)], ...
             [cameraPosHistory(i, 2), cfg.calibration.lookAtTarget(2)], ...
             [cameraPosHistory(i, 3), cfg.calibration.lookAtTarget(3)], ...
-            '-', 'Color', [0.3 0.3 0.3], 'LineWidth', 1.2);
+            '-', 'Color', [0.3 0.3 0.3], 'LineWidth', 1.2, 'HandleVisibility', 'off');
         draw_camera_frame(ax1, cameraPoses(:, :, i), 0.035, sprintf('%d/%d', i, numViews), 1.5);
-        apply_world_view(ax1, cfg, cfg.scene);
+apply_world_view(ax1, cfg, cfg.scene);
         axis(ax1, [cfg.scene.tableX, cfg.scene.tableY, -0.02, 0.85]);
 
         img = local_render_charuco_view(cameraPoses(:, :, i), cameraTrue, board, cfg.scene.backgroundColor);
@@ -257,20 +260,23 @@ title(ax, 'ChArUco board and camera path');
 xlabel(ax, 'X (m)');
 ylabel(ax, 'Y (m)');
 zlabel(ax, 'Z (m)');
-patch(ax, 'XData', board.boardCornersWorld(:, 1), 'YData', board.boardCornersWorld(:, 2), 'ZData', board.boardCornersWorld(:, 3), ...
+hBoard = patch(ax, 'XData', board.boardCornersWorld(:, 1), 'YData', board.boardCornersWorld(:, 2), 'ZData', board.boardCornersWorld(:, 3), ...
     'FaceColor', [0.92 0.92 0.97], 'FaceAlpha', 0.65, 'EdgeColor', [0.35 0.35 0.5], 'LineWidth', 1.2);
-plot3(ax, board.worldPoints3DCalib(:, 1), board.worldPoints3DCalib(:, 2), board.worldPoints3DCalib(:, 3), 'k.', 'MarkerSize', 9);
-plot3(ax, cameraPosHistory(:, 1), cameraPosHistory(:, 2), cameraPosHistory(:, 3), '-or', 'LineWidth', 1.5, 'MarkerFaceColor', 'r');
+hCorners = plot3(ax, board.worldPoints3DCalib(:, 1), board.worldPoints3DCalib(:, 2), board.worldPoints3DCalib(:, 3), 'k.', 'MarkerSize', 9);
+hPath = plot3(ax, cameraPosHistory(:, 1), cameraPosHistory(:, 2), cameraPosHistory(:, 3), '-or', 'LineWidth', 1.5, 'MarkerFaceColor', 'r');
 for i = 1:size(cameraPosHistory, 1)
     plot3(ax, [cameraPosHistory(i, 1), cfg.calibration.lookAtTarget(1)], ...
         [cameraPosHistory(i, 2), cfg.calibration.lookAtTarget(2)], ...
         [cameraPosHistory(i, 3), cfg.calibration.lookAtTarget(3)], ...
-        '-', 'Color', [0.55 0.55 0.55]);
+        '-', 'Color', [0.55 0.55 0.55], 'HandleVisibility', 'off');
 end
 draw_camera_frame(ax, cameraPoses(:, :, 1), 0.035, 'start', 1.6);
 draw_camera_frame(ax, cameraPoses(:, :, end), 0.035, 'end', 1.6);
 apply_world_view(ax, cfg, cfg.scene);
-legend(ax, {'Board plane', 'ChArUco corners', 'Camera path'}, 'Location', 'best');
+lgd = legend(ax, [hBoard, hCorners, hPath], {'Board plane', 'ChArUco corners', 'Camera path'}, ...
+    'Location', 'southoutside', 'Orientation', 'horizontal', 'NumColumns', 3);
+set(lgd, 'AutoUpdate', 'off');
+legend(ax, 'boxoff');
 axis(ax, [cfg.scene.tableX, cfg.scene.tableY, -0.02, 0.85]);
 apply_axes_theme(ax, 'plot');
 figurePaths.boardPath = fullfile(cfg.paths.calibration, 't1_calibration_board_path.png');
