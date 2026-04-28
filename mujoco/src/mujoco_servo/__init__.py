@@ -1,13 +1,11 @@
-"""MuJoCo vision-servo package."""
-
-from .config import AppSettings, build_settings
-from .runtime import run_simulation, run_camera, run_gui
+from .app import RunSummary, VisualServoSimulation, run_demo
+from .config import CameraConfig, ControllerConfig, DemoConfig
 
 __all__ = [
-    "AppSettings",
-    "build_settings",
-    "run_simulation",
-    "run_camera",
-    "run_gui",
+    "CameraConfig",
+    "ControllerConfig",
+    "DemoConfig",
+    "RunSummary",
+    "VisualServoSimulation",
+    "run_demo",
 ]
-

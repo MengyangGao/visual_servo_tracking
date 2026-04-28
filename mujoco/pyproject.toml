@@ -4,24 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mujoco-servo"
-version = "0.1.0"
-description = "MuJoCo vision servo with prompt-driven perception"
-requires-python = ">=3.12"
+version = "0.2.0"
+description = "Self-contained MuJoCo visual-servo tracking demo"
+requires-python = ">=3.10"
 dependencies = [
-  "numpy>=1.26",
-  "opencv-python>=4.10",
-  "mujoco>=3.4",
-  "Pillow>=10",
-  "torch>=2.3",
+  "numpy>=1.24",
+  "mujoco>=3.1",
+  "opencv-python>=4.8",
 ]
 
 [project.optional-dependencies]
-open-vocab = [
-  "transformers>=5.0",
-  "torchvision>=0.18",
-  "hydra-core>=1.3.2",
-  "iopath>=0.1.10",
-  "tqdm>=4.66.1",
+semantic = [
+  "torch>=2.3",
+  "transformers>=4.40",
+  "Pillow>=10",
+]
+test = [
+  "pytest>=7.4",
 ]
 
 [project.scripts]
@@ -32,3 +31,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

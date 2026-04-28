@@ -1,81 +1,53 @@
 from __future__ import annotations
 
 import argparse
+import json
 
-from .camera import discover_cameras
-from .config import build_settings
-from .runtime import run_camera, run_gui, run_simulation
+from .app import run_demo
+from .config import CameraConfig, ControllerConfig, DemoConfig, available_tasks, available_trajectories
+from .targets import TARGETS
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="mujoco-servo", description="MuJoCo vision servo")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    sim = subparsers.add_parser("sim", help="run simulation")
-    sim.add_argument("--prompt", default="cup")
-    sim.add_argument("--backend", default="oracle")
-    sim.add_argument("--vision-preset", default="default", choices=["default", "small", "lite"])
-    sim.add_argument("--steps", type=int, default=240)
-    sim.add_argument("--no-view", action="store_true")
-    sim.add_argument("--record", action="store_true")
-
-    cam = subparsers.add_parser("camera", help="run camera loop")
-    cam.add_argument("--prompt", default="cup")
-    cam.add_argument("--backend", default="auto")
-    cam.add_argument("--vision-preset", default="default", choices=["default", "small", "lite"])
-    cam.add_argument("--steps", type=int, default=240)
-    cam.add_argument("--camera-index", type=int, default=None)
-    cam.add_argument("--mode", default="camera")
-    cam.add_argument("--run-mode", default="manual")
-    cam.add_argument("--no-view", action="store_true")
-    cam.add_argument("--record", action="store_true")
-
-    subparsers.add_parser("gui", help="launch GUI")
-    subparsers.add_parser("cameras", help="list cameras")
+    parser = argparse.ArgumentParser(description="MuJoCo visual-servo tracking demo")
+    parser.add_argument("--target", default="cup", choices=sorted(TARGETS.keys()), help="target object")
+    parser.add_argument("--trajectory", default="circle", choices=available_trajectories(), help="target motion")
+    parser.add_argument("--task", default="contact", choices=available_tasks(), help="servo objective")
+    parser.add_argument("--detector", default="oracle", choices=("oracle", "color", "semantic"), help="perception backend")
+    parser.add_argument("--steps", type=int, default=1200, help="control steps to run")
+    parser.add_argument("--headless", action="store_true", help="run without the MuJoCo viewer")
+    parser.add_argument("--no-realtime", action="store_true", help="do not sleep to match wall-clock time")
+    parser.add_argument("--standoff", type=float, default=0.16, help="standoff distance for --task standoff")
+    parser.add_argument("--seed", type=int, default=7, help="random seed for random-walk trajectory")
+    parser.add_argument("--camera-width", type=int, default=640)
+    parser.add_argument("--camera-height", type=int, default=480)
     return parser
+
+
+def config_from_args(args: argparse.Namespace) -> DemoConfig:
+    camera = CameraConfig(width=args.camera_width, height=args.camera_height)
+    controller = ControllerConfig(task=args.task, standoff_m=args.standoff)
+    return DemoConfig(
+        target=args.target,
+        trajectory=args.trajectory,
+        detector=args.detector,
+        steps=args.steps,
+        headless=args.headless,
+        viewer=not args.headless,
+        realtime=not args.no_realtime,
+        seed=args.seed,
+        camera=camera,
+        controller=controller,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command == "cameras":
-        cameras = discover_cameras()
-        if not cameras:
-            print("No camera devices found or the process does not have camera permission.")
-        for info in cameras:
-            print(f"{info.index}: backend={info.backend_name} size={info.frame_size}")
-        return 0
-    if args.command == "gui":
-        run_gui()
-        return 0
-    if args.command == "sim":
-        settings = build_settings(
-            prompt=args.prompt,
-            backend=args.backend,
-            mode="sim",
-            run_mode="auto",
-            vision_preset=args.vision_preset,
-            max_steps=args.steps,
-            show_view=not args.no_view,
-            record=args.record,
-        )
-        summary = run_simulation(settings)
-        print(summary)
-        return 0
-    if args.command == "camera":
-        settings = build_settings(
-            prompt=args.prompt,
-            backend=args.backend,
-            mode=args.mode,
-            run_mode=args.run_mode,
-            vision_preset=args.vision_preset,
-            max_steps=args.steps,
-            camera_index=args.camera_index,
-            show_view=not args.no_view,
-            record=args.record,
-        )
-        summary = run_camera(settings)
-        print(summary)
-        return 0
-    parser.error("unknown command")
-    return 1
+    summary = run_demo(config_from_args(args))
+    print(json.dumps(summary.as_dict(), indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

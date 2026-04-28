@@ -1,120 +1,75 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from .types import AppSettings, CameraIntrinsics, CameraPose, TargetPrototype
-from .geometry import look_at_rotation
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+@dataclass(frozen=True)
+class CameraConfig:
+    name: str = "servo_camera"
+    width: int = 640
+    height: int = 480
+    fovy_deg: float = 45.0
+    position: tuple[float, float, float] = (0.85, -1.15, 0.85)
+    lookat: tuple[float, float, float] = (0.45, 0.0, 0.35)
+
+
+@dataclass(frozen=True)
+class TargetSpec:
+    name: str
+    shape: str
+    size: tuple[float, float, float]
+    rgba: tuple[float, float, float, float]
+    aliases: tuple[str, ...] = ()
+
+    @property
+    def radius(self) -> float:
+        return 0.5 * max(self.size)
+
+
+@dataclass(frozen=True)
+class ControllerConfig:
+    task: str = "contact"
+    control_hz: float = 120.0
+    position_gain: float = 7.0
+    damping: float = 0.08
+    max_ee_speed: float = 1.05
+    max_joint_speed: float = 2.6
+    standoff_m: float = 0.16
+    align_offset_m: float = 0.0
+    smooth_target_alpha: float = 0.55
+
+
+@dataclass(frozen=True)
+class DemoConfig:
+    target: str = "cup"
+    trajectory: str = "circle"
+    detector: str = "oracle"
+    steps: int = 1200
+    headless: bool = False
+    viewer: bool = True
+    realtime: bool = True
+    seed: int = 7
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    controller: ControllerConfig = field(default_factory=ControllerConfig)
 
 
 def project_root() -> Path:
-    return repo_root() / "mujoco"
+    return ROOT
 
 
-def reference_root() -> Path:
-    return repo_root() / "reference"
+def default_home_qpos() -> np.ndarray:
+    return np.array([0.05, 1.2, 0.0, -1.35, 0.0, 1.75, 0.0], dtype=float)
 
 
-def panda_scene_path() -> Path:
-    return reference_root() / "mujoco_menagerie" / "franka_emika_panda" / "scene.xml"
+def available_tasks() -> tuple[str, ...]:
+    return ("contact", "standoff", "align-x", "align-y", "align-z")
 
 
-TARGET_LIBRARY: dict[str, TargetPrototype] = {
-    "cup": TargetPrototype("cup", "cylinder", (0.08, 0.08, 0.10), (0.95, 0.35, 0.20, 1.0), aliases=("mug", "cup")),
-    "mug": TargetPrototype("cup", "cylinder", (0.08, 0.08, 0.10), (0.95, 0.35, 0.20, 1.0), aliases=("cup", "mug")),
-    "phone": TargetPrototype("phone", "box", (0.075, 0.010, 0.150), (0.15, 0.15, 0.15, 1.0), aliases=("phone", "mobile")),
-    "mobile": TargetPrototype("phone", "box", (0.075, 0.010, 0.150), (0.15, 0.15, 0.15, 1.0), aliases=("phone", "mobile")),
-    "mouse": TargetPrototype("mouse", "box", (0.060, 0.040, 0.100), (0.85, 0.80, 0.75, 1.0), aliases=("mouse",)),
-    "apple": TargetPrototype("apple", "sphere", (0.075, 0.075, 0.075), (0.90, 0.18, 0.18, 1.0), aliases=("apple",)),
-    "book": TargetPrototype("book", "box", (0.160, 0.025, 0.230), (0.18, 0.25, 0.75, 1.0), aliases=("book",)),
-    "bottle": TargetPrototype("bottle", "cylinder", (0.045, 0.045, 0.240), (0.10, 0.50, 0.90, 1.0), aliases=("bottle",)),
-    "box": TargetPrototype("box", "box", (0.110, 0.080, 0.110), (0.65, 0.45, 0.20, 1.0), aliases=("box",)),
-}
-
-
-def canonical_prompt(prompt: str) -> str:
-    return " ".join(prompt.lower().strip().split())
-
-
-def lookup_target_prototype(prompt: str) -> TargetPrototype:
-    text = canonical_prompt(prompt)
-    for key, prototype in TARGET_LIBRARY.items():
-        if key in text or any(alias in text for alias in prototype.aliases):
-            return prototype
-    return TargetPrototype("object", "box", (0.10, 0.10, 0.10), (0.85, 0.25, 0.25, 1.0), aliases=("object",))
-
-
-def target_world_position(prompt: str) -> np.ndarray:
-    key = lookup_target_prototype(prompt).name
-    table = {
-        "cup": np.array([0.58, 0.10, 0.25], dtype=float),
-        "phone": np.array([0.62, -0.08, 0.24], dtype=float),
-        "mouse": np.array([0.55, -0.18, 0.24], dtype=float),
-        "apple": np.array([0.50, 0.18, 0.26], dtype=float),
-        "book": np.array([0.60, 0.00, 0.26], dtype=float),
-        "bottle": np.array([0.56, -0.22, 0.28], dtype=float),
-        "box": np.array([0.59, 0.03, 0.25], dtype=float),
-        "object": np.array([0.58, 0.05, 0.25], dtype=float),
-    }
-    return table.get(key, table["object"]).copy()
-
-
-def moving_target_world_position(prompt: str, time_s: float) -> np.ndarray:
-    base = target_world_position(prompt)
-    text = canonical_prompt(prompt)
-    phase = (sum(ord(ch) for ch in text) % 360) * np.pi / 180.0
-    t = float(max(time_s, 0.0))
-    offset = np.array(
-        [
-            0.085 * np.sin(0.55 * t + phase),
-            0.060 * np.sin(0.37 * t + 0.7 * phase),
-            0.030 * np.sin(0.47 * t + 0.4 * phase),
-        ],
-        dtype=float,
-    )
-    target = base + offset
-    target[2] = max(0.16, float(target[2]))
-    return target
-
-
-def default_camera_intrinsics(width: int, height: int) -> CameraIntrinsics:
-    fx = 0.92 * width
-    fy = 0.92 * width
-    return CameraIntrinsics(fx=fx, fy=fy, cx=width / 2.0, cy=height / 2.0, width=width, height=height)
-
-
-def canonical_camera_pose() -> CameraPose:
-    translation = np.array([0.18, -0.95, 0.82], dtype=float)
-    look_at = np.array([0.56, 0.00, 0.25], dtype=float)
-    rotation = look_at_rotation(look_at - translation, np.array([0.0, 0.0, 1.0], dtype=float))
-    return CameraPose(translation_m=translation, rotation_world_from_cam=rotation)
-
-
-def build_settings(
-    prompt: str = "cup",
-    backend: str = "auto",
-    mode: str = "sim",
-    run_mode: str = "auto",
-    vision_preset: str = "default",
-    max_steps: int = 240,
-    camera_index: int | None = None,
-    show_view: bool = True,
-    record: bool = False,
-) -> AppSettings:
-    return AppSettings(
-        prompt=prompt,
-        backend=backend,
-        mode=mode,
-        run_mode=run_mode,
-        vision_preset=vision_preset,
-        max_steps=max_steps,
-        camera_index=camera_index,
-        show_view=show_view,
-        record=record,
-    )
+def available_trajectories() -> tuple[str, ...]:
+    return ("static", "circle", "figure-eight", "random-walk", "waypoints")

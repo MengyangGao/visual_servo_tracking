@@ -5,176 +5,104 @@ from dataclasses import dataclass
 import mujoco
 import numpy as np
 
-from .geometry import (
-    damped_pseudo_inverse,
-    look_at_rotation,
-    normalize,
-    rotation_matrix_to_axis_angle,
-    rotation_matrix_to_quaternion_wxyz,
-)
-from .image_features import bbox_corners_xyxy, order_corners_clockwise
-from .types import CameraPose, Detection, ServoTelemetry, TargetPrototype
-from .scene import body_pose_world
+from .config import ControllerConfig, default_home_qpos
+from .math_utils import clamp_norm, damped_pseudo_inverse, normalize
+from .scene import site_position
 
 
 @dataclass(slots=True)
-class ServoGains:
-    feature: float = 1.6
-    position: float = 2.2
-    orientation: float = 1.0
-    damping: float = 0.12
-    max_joint_delta: float = 0.06
+class ServoState:
+    step: int
+    time_s: float
+    ee_position: np.ndarray
+    target_position: np.ndarray
+    desired_position: np.ndarray
+    position_error_m: float
+    target_distance_m: float
+    qpos_command: np.ndarray
 
 
-def _ee_jacobian(model: mujoco.MjModel, data: mujoco.MjData, body_name: str) -> np.ndarray:
-    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
-    if body_id < 0:
-        raise KeyError(f"end-effector body '{body_name}' not found")
-    jacp = np.zeros((3, model.nv), dtype=float)
-    jacr = np.zeros((3, model.nv), dtype=float)
-    mujoco.mj_jacBody(model, data, jacp, jacr, body_id)
-    return np.vstack([jacp, jacr])
+def desired_ee_position(task: str, target_position: np.ndarray, ee_position: np.ndarray, config: ControllerConfig) -> np.ndarray:
+    target = np.asarray(target_position, dtype=float).reshape(3)
+    ee = np.asarray(ee_position, dtype=float).reshape(3)
+    mode = task.strip().lower()
+    if mode == "contact":
+        return target.copy()
+    if mode == "standoff":
+        direction = normalize(ee - target, np.array([-1.0, 0.0, 0.0]))
+        return target + direction * float(config.standoff_m)
+    if mode == "align-x":
+        return np.array([target[0] + config.align_offset_m, ee[1], ee[2]], dtype=float)
+    if mode == "align-y":
+        return np.array([ee[0], target[1] + config.align_offset_m, ee[2]], dtype=float)
+    if mode == "align-z":
+        return np.array([ee[0], ee[1], target[2] + config.align_offset_m], dtype=float)
+    raise ValueError(f"unknown servo task '{task}'")
 
 
-def _desired_target_position(
-    detection: Detection,
-    prototype: TargetPrototype,
-    camera_intrinsics,
-    camera_pose: CameraPose,
-    ee_position: np.ndarray,
-) -> np.ndarray:
-    if detection.target_position_world is not None:
-        return np.asarray(detection.target_position_world, dtype=float)
-    if detection.estimated_distance_m is None:
-        depth = prototype.nominal_standoff_m
-    else:
-        depth = float(detection.estimated_distance_m)
-    u, v = np.asarray(detection.centroid_px, dtype=float).reshape(2)
-    ray_cam = np.array(
-        [
-            (u - camera_intrinsics.cx) / camera_intrinsics.fx,
-            (v - camera_intrinsics.cy) / camera_intrinsics.fy,
-            1.0,
-        ],
-        dtype=float,
-    )
-    ray_cam = normalize(ray_cam)
-    point_cam = ray_cam * depth
-    point_world = camera_pose.rotation_world_from_cam @ point_cam + camera_pose.translation_m
-    return point_world
-
-
-def _feature_points_from_detection(detection: Detection) -> np.ndarray:
-    if detection.corners_px is not None:
-        return order_corners_clockwise(detection.corners_px)
-    return bbox_corners_xyxy(detection.bbox_xyxy)
-
-
-def _desired_feature_corners(prototype: TargetPrototype, camera_intrinsics) -> np.ndarray:
-    extent = max(float(prototype.size_m[0]), float(prototype.size_m[1]), float(prototype.size_m[2]), 1e-3)
-    depth = max(float(prototype.nominal_standoff_m), 1e-3)
-    half_extent_px_x = max(16.0, 0.5 * camera_intrinsics.fx * extent / depth)
-    half_extent_px_y = max(16.0, 0.5 * camera_intrinsics.fy * extent / depth)
-    center_x = float(camera_intrinsics.cx)
-    center_y = float(camera_intrinsics.cy)
-    return order_corners_clockwise(
-        np.array(
-            [
-                [center_x - half_extent_px_x, center_y - half_extent_px_y],
-                [center_x + half_extent_px_x, center_y - half_extent_px_y],
-                [center_x + half_extent_px_x, center_y + half_extent_px_y],
-                [center_x - half_extent_px_x, center_y + half_extent_px_y],
-            ],
-            dtype=np.float32,
-        )
-    )
-
-
-def _interaction_matrix(points_px: np.ndarray, depth_m: float, intrinsics) -> np.ndarray:
-    depth = max(float(depth_m), 1e-6)
-    matrix = np.zeros((8, 6), dtype=np.float64)
-    for i, (u, v) in enumerate(np.asarray(points_px, dtype=float).reshape(4, 2)):
-        x = (u - intrinsics.cx) / intrinsics.fx
-        y = (v - intrinsics.cy) / intrinsics.fy
-        matrix[2 * i : 2 * i + 2] = np.array(
-            [
-                [-1.0 / depth, 0.0, x / depth, x * y, -(1.0 + x * x), y],
-                [0.0, -1.0 / depth, y / depth, 1.0 + y * y, -x * y, -x],
-            ],
-            dtype=np.float64,
-        )
-    return matrix
-
-
-def compute_servo_command(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    detection: Detection,
-    prototype: TargetPrototype,
-    camera_intrinsics,
-    camera_pose: CameraPose,
-    ee_body_name: str,
-    gains: ServoGains,
-    dt: float,
-) -> tuple[np.ndarray, ServoTelemetry]:
-    ee_pos, ee_rot = body_pose_world(model, data, ee_body_name)
-    target_pos = _desired_target_position(detection, prototype, camera_intrinsics, camera_pose, ee_pos)
-    current_points = _feature_points_from_detection(detection)
-    desired_points = _desired_feature_corners(prototype, camera_intrinsics)
-    depth = float(detection.estimated_distance_m or prototype.nominal_standoff_m)
-    standoff = float(prototype.nominal_standoff_m)
-    feature_error = np.zeros((8, 1), dtype=np.float64)
-    for i in range(4):
-        feature_error[2 * i] = current_points[i, 0] - desired_points[i, 0]
-        feature_error[2 * i + 1] = current_points[i, 1] - desired_points[i, 1]
-    interaction = _interaction_matrix(current_points, depth, camera_intrinsics)
-    feature_scale = np.tile(np.array([camera_intrinsics.fx, camera_intrinsics.fy], dtype=np.float64), 4).reshape(-1, 1)
-    camera_twist_cam = -gains.feature * damped_pseudo_inverse(interaction, damping=gains.damping) @ (feature_error / feature_scale)
-    camera_twist_cam = np.asarray(camera_twist_cam, dtype=float).reshape(6)
-    camera_twist_world = np.concatenate(
-        [
-            camera_pose.rotation_world_from_cam @ camera_twist_cam[:3],
-            camera_pose.rotation_world_from_cam @ camera_twist_cam[3:],
+class ResolvedRateController:
+    def __init__(self, model: mujoco.MjModel, ee_site_name: str, config: ControllerConfig) -> None:
+        self.model = model
+        self.ee_site_name = ee_site_name
+        self.config = config
+        self._qpos_command = default_home_qpos()
+        self._filtered_target: np.ndarray | None = None
+        self._joint_ids = [
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"joint{i}")
+            for i in range(1, 8)
         ]
-    )
-    los = normalize(target_pos - ee_pos)
-    if not np.any(los):
-        los = ee_rot[:, 2]
-    desired_ee_pos = target_pos - los * standoff
-    desired_rot = look_at_rotation(target_pos - desired_ee_pos, np.array([0.0, 0.0, 1.0], dtype=float))
-    pos_error = desired_ee_pos - ee_pos
-    ori_error = rotation_matrix_to_axis_angle(desired_rot @ ee_rot.T)
-    jacobian = _ee_jacobian(model, data, ee_body_name)
-    pose_twist_world = np.concatenate(
-        [
-            gains.position * pos_error,
-            gains.orientation * ori_error,
-        ]
-    )
-    combined_twist_world = pose_twist_world + 0.35 * camera_twist_world
-    qvel = damped_pseudo_inverse(jacobian, damping=gains.damping) @ combined_twist_world
-    qvel = np.asarray(qvel, dtype=float)
-    if qvel.shape[0] > 0:
-        norm = float(np.linalg.norm(qvel))
-        if norm > gains.max_joint_delta / max(dt, 1e-9):
-            qvel = qvel / norm * (gains.max_joint_delta / max(dt, 1e-9))
-    qpos = np.array(data.qpos.copy(), dtype=float)
-    if model.nu >= 7:
-        qpos[:7] = qpos[:7] + qvel[:7] * dt
-    telemetry = ServoTelemetry(
-        step=0,
-        prompt=detection.prompt,
-        backend=detection.backend,
-        qpos=qpos.copy(),
-        qvel=qvel.copy(),
-        ee_position_m=ee_pos.copy(),
-        ee_orientation_wxyz=rotation_matrix_to_quaternion_wxyz(ee_rot),
-        target_position_m=target_pos.copy(),
-        position_error_m=float(np.linalg.norm(pos_error)),
-        orientation_error_rad=float(np.linalg.norm(ori_error)),
-        detection_score=float(detection.score),
-        target_distance_m=float(np.linalg.norm(target_pos - ee_pos)),
-        standoff_error_m=float(np.linalg.norm(target_pos - ee_pos) - standoff),
-        feature_error_px=float(np.linalg.norm(feature_error)),
-    )
-    return qpos, telemetry
+        if any(joint_id < 0 for joint_id in self._joint_ids):
+            raise RuntimeError("expected joints joint1..joint7")
+        self._qpos_adr = np.array([model.jnt_qposadr[joint_id] for joint_id in self._joint_ids], dtype=int)
+        self._dof_adr = np.array([model.jnt_dofadr[joint_id] for joint_id in self._joint_ids], dtype=int)
+        self._site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, ee_site_name)
+        if self._site_id < 0:
+            raise RuntimeError(f"site '{ee_site_name}' not found")
+
+    def reset(self, data: mujoco.MjData) -> None:
+        self._qpos_command = np.array(data.qpos[self._qpos_adr], dtype=float)
+        self._filtered_target = None
+
+    def step(self, data: mujoco.MjData, target_position: np.ndarray, time_s: float, step_index: int) -> ServoState:
+        target = np.asarray(target_position, dtype=float).reshape(3)
+        if self._filtered_target is None:
+            self._filtered_target = target.copy()
+        else:
+            alpha = float(self.config.smooth_target_alpha)
+            self._filtered_target = (1.0 - alpha) * self._filtered_target + alpha * target
+
+        ee_pos = site_position(self.model, data, self.ee_site_name)
+        desired = desired_ee_position(self.config.task, self._filtered_target, ee_pos, self.config)
+        error = desired - ee_pos
+        ee_velocity = clamp_norm(float(self.config.position_gain) * error, self.config.max_ee_speed)
+
+        jacp = np.zeros((3, self.model.nv), dtype=float)
+        jacr = np.zeros((3, self.model.nv), dtype=float)
+        mujoco.mj_jacSite(self.model, data, jacp, jacr, self._site_id)
+        arm_jac = jacp[:, self._dof_adr]
+        qvel = damped_pseudo_inverse(arm_jac, self.config.damping) @ ee_velocity
+
+        home_error = default_home_qpos() - np.asarray(data.qpos[self._qpos_adr], dtype=float)
+        nullspace = np.eye(7) - damped_pseudo_inverse(arm_jac, self.config.damping) @ arm_jac
+        qvel = qvel + 0.18 * (nullspace @ home_error)
+        qvel = clamp_norm(qvel, self.config.max_joint_speed)
+
+        dt = 1.0 / float(self.config.control_hz)
+        current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
+        self._qpos_command = self._qpos_command + qvel * dt
+        self._qpos_command = np.clip(self._qpos_command, current_qpos - 0.22, current_qpos + 0.22)
+        for i, joint_id in enumerate(self._joint_ids):
+            lo, hi = self.model.jnt_range[joint_id]
+            self._qpos_command[i] = np.clip(self._qpos_command[i], lo + 1e-4, hi - 1e-4)
+        data.ctrl[:7] = self._qpos_command
+
+        return ServoState(
+            step=step_index,
+            time_s=time_s,
+            ee_position=ee_pos,
+            target_position=self._filtered_target.copy(),
+            desired_position=desired,
+            position_error_m=float(np.linalg.norm(error)),
+            target_distance_m=float(np.linalg.norm(self._filtered_target - ee_pos)),
+            qpos_command=self._qpos_command.copy(),
+        )
