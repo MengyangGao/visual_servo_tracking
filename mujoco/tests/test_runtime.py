@@ -76,7 +76,7 @@ def test_viewer_key_controls_use_requested_shortcuts() -> None:
     app = VisualServoSimulation(cfg)
     app._handle_key(ord("l"))
     assert app._mouse_drag_enabled
-    app._handle_key(glfw.KEY_RIGHT_BRACKET)
+    app._handle_key(glfw.KEY_X)
     assert app._manual_target_velocity[2] > 0.0
-    app._handle_key(glfw.KEY_LEFT_BRACKET)
+    app._handle_key(glfw.KEY_Z)
     assert app._manual_target_velocity[2] < 0.0

@@ -67,6 +67,8 @@ class VisualServoSimulation:
         self._perception_future: Future[tuple[CameraObservation, Detection]] | None = None
         self._last_detection: Detection | None = None
         self._perception_disabled = False
+        self._target_drag_perturb_initialized = False
+        self._target_drag_clear_requested = False
 
     def run(self) -> RunSummary:
         viewer = None
@@ -154,6 +156,8 @@ class VisualServoSimulation:
                 command_target = last_observed_target
             elif self.detector_name == "oracle":
                 command_target = target_pos
+            elif self._uses_async_perception(viewer):
+                command_target = target_pos
             else:
                 command_target = frame_position(model, data, self.scene.ee_frame_type, self.scene.ee_frame_name, self.scene.ee_frame_offset)
             last_state = self.controller.step(data, command_target, time_s, step)
@@ -167,6 +171,7 @@ class VisualServoSimulation:
                 mujoco.mj_step(model, data)
 
             if viewer is not None:
+                self._keep_viewer_camera_free(viewer)
                 self._update_viewer_overlay(viewer)
                 viewer.sync()
             if self.config.realtime and viewer is not None:
@@ -274,34 +279,52 @@ class VisualServoSimulation:
         target = site_position(self.scene.model, self.scene.data, self.scene.target_site_name)
         ee = frame_position(self.scene.model, self.scene.data, self.scene.ee_frame_type, self.scene.ee_frame_name, self.scene.ee_frame_offset)
         midpoint = 0.55 * target + 0.45 * ee
-        viewer.cam.lookat[:] = midpoint
-        viewer.cam.distance = 1.35
-        viewer.cam.azimuth = 132.0
-        viewer.cam.elevation = -24.0
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_SELECT] = False
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = False
-        self._clear_target_perturb(viewer)
+        with viewer.lock():
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+            viewer.cam.lookat[:] = midpoint
+            viewer.cam.distance = 1.35
+            viewer.cam.azimuth = 132.0
+            viewer.cam.elevation = -24.0
+            viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_SELECT] = False
+            viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = False
+            self._clear_target_perturb(viewer)
         self._viewer_camera_initialized = True
 
-    def _select_target_for_perturb(self, viewer) -> None:
+    def _keep_viewer_camera_free(self, viewer) -> None:
+        if viewer.cam.type == mujoco.mjtCamera.mjCAMERA_FREE:
+            return
+        with viewer.lock():
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+            viewer.cam.fixedcamid = -1
+
+    def _initialize_target_perturb(self, viewer) -> None:
         body_id = mujoco.mj_name2id(self.scene.model, mujoco.mjtObj.mjOBJ_BODY, self.scene.target_body_name)
         if body_id < 0:
             return
-        viewer.perturb.select = body_id
-        viewer.perturb.active = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
-        viewer.perturb.active2 = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
-        viewer.perturb.refpos[:] = site_position(self.scene.model, self.scene.data, self.scene.target_site_name)
-        viewer.perturb.localpos[:] = 0.0
-        viewer.perturb.scale = 0.25
+        with viewer.lock():
+            viewer.perturb.select = body_id
+            viewer.perturb.active = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
+            viewer.perturb.active2 = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
+            if viewer.user_scn is not None:
+                mujoco.mjv_initPerturb(self.scene.model, self.scene.data, viewer.user_scn, viewer.perturb)
+            else:
+                viewer.perturb.refpos[:] = site_position(self.scene.model, self.scene.data, self.scene.target_site_name)
+                viewer.perturb.localpos[:] = 0.0
+                viewer.perturb.scale = 0.25
+        self._target_drag_perturb_initialized = True
 
     def _clear_target_perturb(self, viewer) -> None:
         viewer.perturb.select = 0
         viewer.perturb.active = 0
         viewer.perturb.active2 = 0
+        self._target_drag_perturb_initialized = False
 
     def _apply_viewer_target_drag(self, viewer, scripted_target: np.ndarray) -> np.ndarray:
         if not self.config.interactive_target or not self._mouse_drag_enabled:
-            self._clear_target_perturb(viewer)
+            if self._target_drag_perturb_initialized or self._target_drag_clear_requested:
+                with viewer.lock():
+                    self._clear_target_perturb(viewer)
+                self._target_drag_clear_requested = False
             return scripted_target
         body_id = mujoco.mj_name2id(self.scene.model, mujoco.mjtObj.mjOBJ_BODY, self.scene.target_body_name)
         if body_id < 0:
@@ -309,11 +332,14 @@ class VisualServoSimulation:
         mocap_id = int(self.scene.model.body_mocapid[body_id])
         if mocap_id < 0:
             return scripted_target
+        if not self._target_drag_perturb_initialized:
+            self._initialize_target_perturb(viewer)
+        with viewer.lock():
+            mujoco.mjv_applyPerturbPose(self.scene.model, self.scene.data, viewer.perturb, 1)
         dragged = np.array(self.scene.data.mocap_pos[mocap_id], dtype=float)
         if np.linalg.norm(dragged - scripted_target) > 1e-6:
             self._manual_target_offset = dragged - self.motion.position(float(self.scene.data.time))
             scripted_target = dragged
-        self._select_target_for_perturb(viewer)
         return scripted_target
 
     def _handle_key(self, keycode: int) -> None:
@@ -323,6 +349,10 @@ class VisualServoSimulation:
             return
         if keycode in {glfw.KEY_L, ord("L"), ord("l")}:
             self._mouse_drag_enabled = not self._mouse_drag_enabled
+            if self._mouse_drag_enabled:
+                self._target_drag_perturb_initialized = False
+            else:
+                self._target_drag_clear_requested = True
             return
         speed = float(self.config.key_speed_mps)
         mapping = {
@@ -330,8 +360,12 @@ class VisualServoSimulation:
             glfw.KEY_RIGHT: (0.0, -speed, 0.0),
             glfw.KEY_UP: (speed, 0.0, 0.0),
             glfw.KEY_DOWN: (-speed, 0.0, 0.0),
-            glfw.KEY_RIGHT_BRACKET: (0.0, 0.0, speed),
-            glfw.KEY_LEFT_BRACKET: (0.0, 0.0, -speed),
+            glfw.KEY_X: (0.0, 0.0, speed),
+            glfw.KEY_Z: (0.0, 0.0, -speed),
+            ord("X"): (0.0, 0.0, speed),
+            ord("x"): (0.0, 0.0, speed),
+            ord("Z"): (0.0, 0.0, -speed),
+            ord("z"): (0.0, 0.0, -speed),
         }
         if keycode in mapping:
             self._manual_target_velocity[:] = mapping[keycode]
@@ -380,7 +414,7 @@ class VisualServoSimulation:
         height = int(width * self.config.camera.height / self.config.camera.width)
         height = min(height, max(180, int(viewport.height * 0.46)))
         x = max(0, int(viewport.width - width - 12))
-        y = max(0, int(viewport.height - height - 12))
+        y = 12
         rect_key = (x, y, width, height)
         if self._latest_overlay_rgb is not None and self._overlay_rect_key == rect_key:
             return

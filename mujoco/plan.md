@@ -12,6 +12,8 @@ Update 4: change semantic perception to Grounding DINO + SAM initialization foll
 
 Update 5: remove perception and camera overlay work from the main viewer hot path, enlarge the overlay, and repair target keyboard/mouse interaction so controls do not induce frame stalls.
 
+Update 6: avoid MuJoCo viewer shortcut conflicts, keep the main viewer in free-camera mode, initialize mouse perturb only once per drag session, and use a non-blocking target prediction while semantic perception warms up.
+
 # User Value
 
 - Run a direct demo with `python scripts/demo.py` or `mjpython scripts/demo.py`.
@@ -102,11 +104,15 @@ Update 5: remove perception and camera overlay work from the main viewer hot pat
 22. Set semantic device selection to auto and throttle expensive Grounding DINO + SAM inference.
 23. Replace periodic semantic inference with one successful Grounding DINO + SAM initialization and per-frame local tracker reuse.
 24. Draw the robot camera stream into a top-right viewer overlay with mask, bbox, centroid, backend, score, and target label.
-25. Change mouse-drag toggle from F2 to `L`, and vertical target movement from PageUp/PageDown to `]`/`[`.
+25. Change mouse-drag toggle from F2 to `L`; avoid PageUp/PageDown and later avoid `[`/`]` because those collide with MuJoCo viewer camera shortcuts.
 26. For interactive viewer runs, sample the robot camera at a low configurable FPS and run perception on a background worker so heavy semantic inference cannot block `viewer.sync()`.
 27. Cache the overlay image and update it only when a fresh camera frame or viewport size change arrives.
 28. Make target dragging state explicit, robust to `L`/`l` keycodes, and stop fighting the mocap target while drag mode is active.
 29. Change continuous key motion to a persistent target velocity with no per-repeat allocations; pressing the same key toggles that axis off.
+30. Replace `[`/`]` target controls because MuJoCo uses them for fixed-camera cycling; use `Z`/`X` for vertical down/up instead.
+31. Force the viewer camera type back to free camera if a built-in key switches it to a fixed camera, without rewriting azimuth/elevation/lookat.
+32. Initialize MuJoCo perturb once when drag mode is enabled, then let the viewer mouse interaction update the mocap body.
+33. During async semantic warmup, servo toward the predicted/simulated target pose instead of holding the EE stationary until the first detection arrives.
 
 # Validation
 
@@ -119,6 +125,7 @@ Update 5: remove perception and camera overlay work from the main viewer hot pat
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 12 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target cup --trajectory static --task contact --detector color --no-realtime`
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 60 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
+- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
 
 # Overlooked Risks Or Edge Cases
 
@@ -138,6 +145,8 @@ Update 5: remove perception and camera overlay work from the main viewer hot pat
 14. MuJoCo rendering should remain on the main thread; the async worker receives copied RGB-D arrays and never touches `MjData`.
 15. If semantic model loading itself is slow, the viewer may still start after construction unless backend loading is fully lazy; the critical runtime fix is to keep inference off the viewer loop.
 16. Viewer perturb APIs can vary by version; keyboard motion remains the reliable fallback if mouse drag behaves differently across MuJoCo releases.
+17. Viewer built-in shortcuts can still consume or act on keys even when `key_callback` is registered; avoid known built-ins rather than relying on callback consumption.
+18. Using simulated target prediction during semantic warmup is a pragmatic demo bootstrap, but the loop switches to visual detections as soon as they are available.
 
 # Risks
 
