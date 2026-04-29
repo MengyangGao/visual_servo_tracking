@@ -10,6 +10,8 @@ Update 3: refine viewer interaction by unlocking the camera, hiding perturb visu
 
 Update 4: change semantic perception to Grounding DINO + SAM initialization followed by local mask/color/depth tracking, add a viewer camera overlay, and move conflicting shortcuts to `L` plus `[`/`]`.
 
+Update 5: remove perception and camera overlay work from the main viewer hot path, enlarge the overlay, and repair target keyboard/mouse interaction so controls do not induce frame stalls.
+
 # User Value
 
 - Run a direct demo with `python scripts/demo.py` or `mjpython scripts/demo.py`.
@@ -101,6 +103,10 @@ Update 4: change semantic perception to Grounding DINO + SAM initialization foll
 23. Replace periodic semantic inference with one successful Grounding DINO + SAM initialization and per-frame local tracker reuse.
 24. Draw the robot camera stream into a top-right viewer overlay with mask, bbox, centroid, backend, score, and target label.
 25. Change mouse-drag toggle from F2 to `L`, and vertical target movement from PageUp/PageDown to `]`/`[`.
+26. For interactive viewer runs, sample the robot camera at a low configurable FPS and run perception on a background worker so heavy semantic inference cannot block `viewer.sync()`.
+27. Cache the overlay image and update it only when a fresh camera frame or viewport size change arrives.
+28. Make target dragging state explicit, robust to `L`/`l` keycodes, and stop fighting the mocap target while drag mode is active.
+29. Change continuous key motion to a persistent target velocity with no per-repeat allocations; pressing the same key toggles that axis off.
 
 # Validation
 
@@ -112,6 +118,7 @@ Update 4: change semantic perception to Grounding DINO + SAM initialization foll
 - `conda run -n visual_servo python -m py_compile mujoco/src/mujoco_servo/app.py mujoco/src/mujoco_servo/cli.py mujoco/src/mujoco_servo/config.py mujoco/src/mujoco_servo/perception.py`
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 12 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target cup --trajectory static --task contact --detector color --no-realtime`
+- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 60 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
 
 # Overlooked Risks Or Edge Cases
 
@@ -128,6 +135,9 @@ Update 4: change semantic perception to Grounding DINO + SAM initialization foll
 11. Semantic local tracking can drift if another object with a similar HSV profile enters the ROI; failed/degraded masks should fall back to Grounding DINO + SAM reinitialization.
 12. Viewer image overlay support depends on MuJoCo Python viewer versions that expose `Handle.set_images`; validated locally against MuJoCo 3.8.0.
 13. The viewer overlay is not visible in headless validation, so manual `mjpython` GUI smoke testing remains useful for layout and interaction feel.
+14. MuJoCo rendering should remain on the main thread; the async worker receives copied RGB-D arrays and never touches `MjData`.
+15. If semantic model loading itself is slow, the viewer may still start after construction unless backend loading is fully lazy; the critical runtime fix is to keep inference off the viewer loop.
+16. Viewer perturb APIs can vary by version; keyboard motion remains the reliable fallback if mouse drag behaves differently across MuJoCo releases.
 
 # Risks
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.app import VisualServoSimulation
@@ -59,3 +61,22 @@ def test_front_standoff_tracks_requested_distance() -> None:
     assert summary.steps == 240
     assert summary.final_error_m < 0.02
     assert abs(summary.final_target_distance_m - 0.12) < 0.02
+
+
+def test_semantic_viewer_mode_lazily_loads_backend() -> None:
+    cfg = DemoConfig(target="apple", trajectory="static", detector="semantic", steps=1, headless=False, viewer=True, realtime=False)
+    app = VisualServoSimulation(cfg)
+    assert app.perception is None
+    assert app.detector_name == "semantic"
+
+
+def test_viewer_key_controls_use_requested_shortcuts() -> None:
+    glfw = pytest.importorskip("glfw")
+    cfg = DemoConfig(target="cup", trajectory="static", detector="oracle", steps=1, headless=True, viewer=False, realtime=False)
+    app = VisualServoSimulation(cfg)
+    app._handle_key(ord("l"))
+    assert app._mouse_drag_enabled
+    app._handle_key(glfw.KEY_RIGHT_BRACKET)
+    assert app._manual_target_velocity[2] > 0.0
+    app._handle_key(glfw.KEY_LEFT_BRACKET)
+    assert app._manual_target_velocity[2] < 0.0

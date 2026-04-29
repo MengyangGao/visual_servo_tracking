@@ -71,6 +71,8 @@ class DemoConfig:
     interactive_target: bool = True
     key_speed_mps: float = 0.18
     camera_overlay: bool = True
+    camera_fps: float = 6.0
+    overlay_width_fraction: float = 0.42
     seed: int = 7
     camera: CameraConfig = field(default_factory=CameraConfig)
     controller: ControllerConfig = field(default_factory=ControllerConfig)

@@ -21,6 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--key-speed-cm-s", type=float, default=18.0, help="continuous keyboard target speed in centimeters per second")
     parser.add_argument("--semantic-interval", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--no-camera-overlay", action="store_true", help="hide the robot camera overlay in the MuJoCo viewer")
+    parser.add_argument("--camera-fps", type=float, default=6.0, help="robot camera processing rate in viewer mode")
+    parser.add_argument("--overlay-width-frac", type=float, default=0.42, help="fraction of viewer width used by the camera overlay")
     parser.add_argument("--standoff", type=float, default=None, help="standoff distance in meters")
     parser.add_argument("--standoff-cm", type=float, default=16.0, help="standoff distance in centimeters for standoff/front-standoff")
     parser.add_argument("--list-targets", action="store_true", help="print built-in target words and exit")
@@ -45,6 +47,8 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         interactive_target=not args.scripted_target,
         key_speed_mps=float(args.key_speed_cm_s) / 100.0,
         camera_overlay=not args.no_camera_overlay,
+        camera_fps=max(0.5, float(args.camera_fps)),
+        overlay_width_fraction=min(0.75, max(0.15, float(args.overlay_width_frac))),
         seed=args.seed,
         camera=camera,
         controller=controller,
