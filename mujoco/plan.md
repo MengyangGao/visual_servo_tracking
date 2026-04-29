@@ -8,13 +8,15 @@ Update 2: remove the procedural arm fallback entirely, make Menagerie Panda mand
 
 Update 3: refine viewer interaction by unlocking the camera, hiding perturb visualization by default, adding toggleable mouse target drag, making keyboard target motion continuous, improving initial Panda pose, and throttling semantic perception.
 
-Update 4: change semantic perception to Grounding DINO + SAM initialization followed by local mask/color/depth tracking, add a viewer camera overlay, and move conflicting shortcuts to `L` plus `[`/`]`.
+Update 4: change semantic perception to Grounding DINO + SAM initialization followed by local mask/color/depth tracking, add a viewer camera overlay, and begin removing conflicting viewer shortcuts.
 
 Update 5: remove perception and camera overlay work from the main viewer hot path, enlarge the overlay, and repair target keyboard/mouse interaction so controls do not induce frame stalls.
 
 Update 6: avoid MuJoCo viewer shortcut conflicts, keep the main viewer in free-camera mode, initialize mouse perturb only once per drag session, and use a non-blocking target prediction while semantic perception warms up.
 
 Update 7: fix MuJoCo overlay coordinate origin, move vertical target controls from `Z`/`X` to `,`/`.`, and add regression coverage for overlay placement.
+
+Update 8: remove the failed mouse/perturb drag path, keep standard MuJoCo mouse camera controls only, simplify manual target control to keyboard offsets, and replace stale root README instructions with current MuJoCo usage.
 
 # User Value
 
@@ -97,26 +99,28 @@ Update 7: fix MuJoCo overlay coordinate origin, move vertical target controls fr
 13. Remove all procedural arm generation code and fail fast if the Menagerie submodule is missing.
 14. Expand target library to include primitive and compound target bodies addressed by free-form words.
 15. Add camera observation plumbing: rendered RGB, rendered depth, intrinsics, and camera pose.
-16. Implement semantic perception using Grounding DINO for open-vocabulary boxes and SAM/SAM2-compatible mask extraction when optional dependencies are installed.
+16. Implement semantic perception using Grounding DINO for open-vocabulary boxes and SAM-compatible mask extraction when optional dependencies are installed.
 17. Add `front-standoff` task mode with CLI distance in centimeters and 6D pose control.
 18. Disable per-frame viewer camera rewrites and only set initial camera once.
-19. Disable perturb/select visualization by default; expose a key toggle for target mouse dragging.
+19. Keep MuJoCo viewer mouse controls reserved for normal camera orbit/pan/zoom.
 20. Replace discrete WASD/QE target nudges with continuous arrow/PageUp/PageDown velocity control.
 21. Move the Panda start pose higher and away from the object approach path.
 22. Set semantic device selection to auto and throttle expensive Grounding DINO + SAM inference.
 23. Replace periodic semantic inference with one successful Grounding DINO + SAM initialization and per-frame local tracker reuse.
 24. Draw the robot camera stream into a top-right viewer overlay with mask, bbox, centroid, backend, score, and target label.
-25. Change mouse-drag toggle from F2 to `L`; avoid PageUp/PageDown and later avoid `[`/`]` because those collide with MuJoCo viewer camera shortcuts.
+25. Avoid PageUp/PageDown and later avoid `[`/`]` because those collide with MuJoCo viewer camera shortcuts.
 26. For interactive viewer runs, sample the robot camera at a low configurable FPS and run perception on a background worker so heavy semantic inference cannot block `viewer.sync()`.
 27. Cache the overlay image and update it only when a fresh camera frame or viewport size change arrives.
-28. Make target dragging state explicit, robust to `L`/`l` keycodes, and stop fighting the mocap target while drag mode is active.
+28. Remove the unreliable mouse target-dragging implementation and its perturb state.
 29. Change continuous key motion to a persistent target velocity with no per-repeat allocations; pressing the same key toggles that axis off.
-30. Replace `[`/`]` target controls because MuJoCo uses them for fixed-camera cycling; use `Z`/`X` for vertical down/up instead.
+30. Replace `[`/`]` target controls because MuJoCo uses them for fixed-camera cycling.
 31. Force the viewer camera type back to free camera if a built-in key switches it to a fixed camera, without rewriting azimuth/elevation/lookat.
 32. Initialize MuJoCo perturb once when drag mode is enabled, then let the viewer mouse interaction update the mocap body.
 33. During async semantic warmup, servo toward the predicted/simulated target pose instead of holding the EE stationary until the first detection arrives.
 34. Place the overlay using MuJoCo's bottom-left image coordinate origin: top-right means `y = viewport.height - overlay.height - margin`.
 35. Replace `Z`/`X` vertical controls with `,`/`.` as requested and keep direction mapping explicit: comma down, period up.
+36. Rename manual target control config to keyboard/manual offsets and make `--scripted-target` disable those offsets.
+37. Replace stale README commands and backend names with the current `mujoco/scripts/demo.py` interface.
 
 # Validation
 
@@ -131,6 +135,7 @@ Update 7: fix MuJoCo overlay coordinate origin, move vertical target controls fr
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 60 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
 - Unit test for overlay rectangle coordinates against a fake viewer viewport.
+- Unit test that scripted target mode ignores keyboard offsets.
 
 # Overlooked Risks Or Edge Cases
 
@@ -143,13 +148,13 @@ Update 7: fix MuJoCo overlay coordinate origin, move vertical target controls fr
 7. Grounding DINO/SAM downloads are large and may be slow on first run; tests should validate wiring without requiring model weights.
 8. Depth unprojection depends on MuJoCo camera conventions; validate with color detector smoke tests against oracle behavior.
 9. Passive viewer key callbacks do not expose key release events, so continuous target motion uses short velocity holds refreshed by key repeat.
-10. Mouse target dragging shares MuJoCo's perturb mechanism; keeping it off by default preserves normal camera orbit behavior.
+10. MuJoCo mouse input remains assigned to the viewer camera; target manipulation is keyboard-only.
 11. Semantic local tracking can drift if another object with a similar HSV profile enters the ROI; failed/degraded masks should fall back to Grounding DINO + SAM reinitialization.
 12. Viewer image overlay support depends on MuJoCo Python viewer versions that expose `Handle.set_images`; validated locally against MuJoCo 3.8.0.
 13. The viewer overlay is not visible in headless validation, so manual `mjpython` GUI smoke testing remains useful for layout and interaction feel.
 14. MuJoCo rendering should remain on the main thread; the async worker receives copied RGB-D arrays and never touches `MjData`.
 15. If semantic model loading itself is slow, the viewer may still start after construction unless backend loading is fully lazy; the critical runtime fix is to keep inference off the viewer loop.
-16. Viewer perturb APIs can vary by version; keyboard motion remains the reliable fallback if mouse drag behaves differently across MuJoCo releases.
+16. Viewer perturb APIs varied enough across runs that the perturb-based target dragging path was removed.
 17. Viewer built-in shortcuts can still consume or act on keys even when `key_callback` is registered; avoid known built-ins rather than relying on callback consumption.
 18. Using simulated target prediction during semantic warmup is a pragmatic demo bootstrap, but the loop switches to visual detections as soon as they are available.
 

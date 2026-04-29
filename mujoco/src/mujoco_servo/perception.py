@@ -326,6 +326,6 @@ def build_perception(name: str) -> PerceptionBackend:
         return OraclePerception()
     if normalized in {"color", "segmentation", "mask"}:
         return ColorSegmentationPerception()
-    if normalized in {"semantic", "grounding-dino", "grounded-sam", "grounded-sam2", "sam", "sam2"}:
+    if normalized in {"semantic", "grounding-dino", "grounded-sam"}:
         return SemanticPerception()
     raise ValueError(f"unknown detector '{name}'")

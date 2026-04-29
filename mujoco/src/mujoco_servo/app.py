@@ -57,7 +57,6 @@ class VisualServoSimulation:
         self._manual_target_velocity = np.zeros(3, dtype=float)
         self._manual_velocity_until = 0.0
         self._last_target_update_time: float | None = None
-        self._mouse_drag_enabled = False
         self._viewer_camera_initialized = False
         self._latest_overlay_bgr: np.ndarray | None = None
         self._latest_overlay_rgb: np.ndarray | None = None
@@ -67,8 +66,6 @@ class VisualServoSimulation:
         self._perception_future: Future[tuple[CameraObservation, Detection]] | None = None
         self._last_detection: Detection | None = None
         self._perception_disabled = False
-        self._target_drag_perturb_initialized = False
-        self._target_drag_clear_requested = False
 
     def run(self) -> RunSummary:
         viewer = None
@@ -144,8 +141,6 @@ class VisualServoSimulation:
                 break
             time_s = float(data.time)
             target_pos = self._target_position(time_s)
-            if viewer is not None and self.config.interactive_target and self._mouse_drag_enabled:
-                target_pos = self._apply_viewer_target_drag(viewer, target_pos)
             set_target_position(model, data, target_pos)
             mujoco.mj_forward(model, data)
 
@@ -164,7 +159,7 @@ class VisualServoSimulation:
             errors.append(last_state.position_error_m)
 
             for _ in range(self._substeps):
-                if self.config.interactive_target and viewer is not None:
+                if self.config.manual_control and viewer is not None:
                     set_target_position(model, data, target_pos)
                 else:
                     set_target_position(model, data, self._target_position(float(data.time)))
@@ -259,8 +254,10 @@ class VisualServoSimulation:
         return observation, perception.detect(observation, truth_position, target, prompt)
 
     def _target_position(self, time_s: float) -> np.ndarray:
-        self._integrate_manual_target_velocity(time_s)
-        return self.motion.position(time_s) + self._manual_target_offset
+        if self.config.manual_control:
+            self._integrate_manual_target_velocity(time_s)
+            return self.motion.position(time_s) + self._manual_target_offset
+        return self.motion.position(time_s)
 
     def _integrate_manual_target_velocity(self, time_s: float) -> None:
         if self._last_target_update_time is None:
@@ -286,8 +283,6 @@ class VisualServoSimulation:
             viewer.cam.azimuth = 132.0
             viewer.cam.elevation = -24.0
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_SELECT] = False
-            viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = False
-            self._clear_target_perturb(viewer)
         self._viewer_camera_initialized = True
 
     def _keep_viewer_camera_free(self, viewer) -> None:
@@ -297,62 +292,12 @@ class VisualServoSimulation:
             viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
             viewer.cam.fixedcamid = -1
 
-    def _initialize_target_perturb(self, viewer) -> None:
-        body_id = mujoco.mj_name2id(self.scene.model, mujoco.mjtObj.mjOBJ_BODY, self.scene.target_body_name)
-        if body_id < 0:
-            return
-        with viewer.lock():
-            viewer.perturb.select = body_id
-            viewer.perturb.active = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
-            viewer.perturb.active2 = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
-            if viewer.user_scn is not None:
-                mujoco.mjv_initPerturb(self.scene.model, self.scene.data, viewer.user_scn, viewer.perturb)
-            else:
-                viewer.perturb.refpos[:] = site_position(self.scene.model, self.scene.data, self.scene.target_site_name)
-                viewer.perturb.localpos[:] = 0.0
-                viewer.perturb.scale = 0.25
-        self._target_drag_perturb_initialized = True
-
-    def _clear_target_perturb(self, viewer) -> None:
-        viewer.perturb.select = 0
-        viewer.perturb.active = 0
-        viewer.perturb.active2 = 0
-        self._target_drag_perturb_initialized = False
-
-    def _apply_viewer_target_drag(self, viewer, scripted_target: np.ndarray) -> np.ndarray:
-        if not self.config.interactive_target or not self._mouse_drag_enabled:
-            if self._target_drag_perturb_initialized or self._target_drag_clear_requested:
-                with viewer.lock():
-                    self._clear_target_perturb(viewer)
-                self._target_drag_clear_requested = False
-            return scripted_target
-        body_id = mujoco.mj_name2id(self.scene.model, mujoco.mjtObj.mjOBJ_BODY, self.scene.target_body_name)
-        if body_id < 0:
-            return scripted_target
-        mocap_id = int(self.scene.model.body_mocapid[body_id])
-        if mocap_id < 0:
-            return scripted_target
-        if not self._target_drag_perturb_initialized:
-            self._initialize_target_perturb(viewer)
-        with viewer.lock():
-            mujoco.mjv_applyPerturbPose(self.scene.model, self.scene.data, viewer.perturb, 1)
-        dragged = np.array(self.scene.data.mocap_pos[mocap_id], dtype=float)
-        if np.linalg.norm(dragged - scripted_target) > 1e-6:
-            self._manual_target_offset = dragged - self.motion.position(float(self.scene.data.time))
-            scripted_target = dragged
-        return scripted_target
-
     def _handle_key(self, keycode: int) -> None:
         try:
             import glfw
         except Exception:
             return
-        if keycode in {glfw.KEY_L, ord("L"), ord("l")}:
-            self._mouse_drag_enabled = not self._mouse_drag_enabled
-            if self._mouse_drag_enabled:
-                self._target_drag_perturb_initialized = False
-            else:
-                self._target_drag_clear_requested = True
+        if not self.config.manual_control:
             return
         speed = float(self.config.key_speed_mps)
         mapping = {
@@ -398,8 +343,6 @@ class VisualServoSimulation:
             label = f"{detection.backend} score={detection.score:.2f}"
         cv2.putText(image, label, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(image, self.config.target, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
-        if self._mouse_drag_enabled:
-            cv2.putText(image, "drag:L on", (10, image.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
         return image
 
     def _update_viewer_overlay(self, viewer) -> None:

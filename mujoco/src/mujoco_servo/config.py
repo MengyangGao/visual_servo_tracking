@@ -68,7 +68,7 @@ class DemoConfig:
     headless: bool = False
     viewer: bool = True
     realtime: bool = True
-    interactive_target: bool = True
+    manual_control: bool = True
     key_speed_mps: float = 0.18
     camera_overlay: bool = True
     camera_fps: float = 6.0

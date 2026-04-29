@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=1200, help="control steps to run")
     parser.add_argument("--headless", action="store_true", help="run without the MuJoCo viewer")
     parser.add_argument("--no-realtime", action="store_true", help="do not sleep to match wall-clock time")
-    parser.add_argument("--scripted-target", action="store_true", help="ignore interactive viewer target edits and use only the scripted trajectory")
+    parser.add_argument("--scripted-target", action="store_true", help="disable keyboard target offsets and use only the scripted trajectory")
     parser.add_argument("--key-speed-cm-s", type=float, default=18.0, help="continuous keyboard target speed in centimeters per second")
     parser.add_argument("--semantic-interval", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--no-camera-overlay", action="store_true", help="hide the robot camera overlay in the MuJoCo viewer")
@@ -44,7 +44,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         headless=args.headless,
         viewer=not args.headless,
         realtime=not args.no_realtime,
-        interactive_target=not args.scripted_target,
+        manual_control=not args.scripted_target,
         key_speed_mps=float(args.key_speed_cm_s) / 100.0,
         camera_overlay=not args.no_camera_overlay,
         camera_fps=max(0.5, float(args.camera_fps)),

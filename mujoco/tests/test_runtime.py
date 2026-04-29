@@ -77,12 +77,28 @@ def test_viewer_key_controls_use_requested_shortcuts() -> None:
     glfw = pytest.importorskip("glfw")
     cfg = DemoConfig(target="cup", trajectory="static", detector="oracle", steps=1, headless=True, viewer=False, realtime=False)
     app = VisualServoSimulation(cfg)
-    app._handle_key(ord("l"))
-    assert app._mouse_drag_enabled
     app._handle_key(glfw.KEY_PERIOD)
     assert app._manual_target_velocity[2] > 0.0
     app._handle_key(glfw.KEY_COMMA)
     assert app._manual_target_velocity[2] < 0.0
+
+
+def test_scripted_target_disables_keyboard_offsets() -> None:
+    glfw = pytest.importorskip("glfw")
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="static",
+        detector="oracle",
+        steps=1,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        manual_control=False,
+    )
+    app = VisualServoSimulation(cfg)
+    app._handle_key(glfw.KEY_UP)
+    assert np.allclose(app._manual_target_velocity, 0.0)
+    assert np.allclose(app._target_position(0.0), app.motion.position(0.0))
 
 
 def test_camera_overlay_uses_top_right_viewport_origin() -> None:
