@@ -14,6 +14,8 @@ Update 5: remove perception and camera overlay work from the main viewer hot pat
 
 Update 6: avoid MuJoCo viewer shortcut conflicts, keep the main viewer in free-camera mode, initialize mouse perturb only once per drag session, and use a non-blocking target prediction while semantic perception warms up.
 
+Update 7: fix MuJoCo overlay coordinate origin, move vertical target controls from `Z`/`X` to `,`/`.`, and add regression coverage for overlay placement.
+
 # User Value
 
 - Run a direct demo with `python scripts/demo.py` or `mjpython scripts/demo.py`.
@@ -113,6 +115,8 @@ Update 6: avoid MuJoCo viewer shortcut conflicts, keep the main viewer in free-c
 31. Force the viewer camera type back to free camera if a built-in key switches it to a fixed camera, without rewriting azimuth/elevation/lookat.
 32. Initialize MuJoCo perturb once when drag mode is enabled, then let the viewer mouse interaction update the mocap body.
 33. During async semantic warmup, servo toward the predicted/simulated target pose instead of holding the EE stationary until the first detection arrives.
+34. Place the overlay using MuJoCo's bottom-left image coordinate origin: top-right means `y = viewport.height - overlay.height - margin`.
+35. Replace `Z`/`X` vertical controls with `,`/`.` as requested and keep direction mapping explicit: comma down, period up.
 
 # Validation
 
@@ -126,6 +130,7 @@ Update 6: avoid MuJoCo viewer shortcut conflicts, keep the main viewer in free-c
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target cup --trajectory static --task contact --detector color --no-realtime`
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 60 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
+- Unit test for overlay rectangle coordinates against a fake viewer viewport.
 
 # Overlooked Risks Or Edge Cases
 

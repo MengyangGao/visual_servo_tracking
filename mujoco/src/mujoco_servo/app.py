@@ -360,12 +360,10 @@ class VisualServoSimulation:
             glfw.KEY_RIGHT: (0.0, -speed, 0.0),
             glfw.KEY_UP: (speed, 0.0, 0.0),
             glfw.KEY_DOWN: (-speed, 0.0, 0.0),
-            glfw.KEY_X: (0.0, 0.0, speed),
-            glfw.KEY_Z: (0.0, 0.0, -speed),
-            ord("X"): (0.0, 0.0, speed),
-            ord("x"): (0.0, 0.0, speed),
-            ord("Z"): (0.0, 0.0, -speed),
-            ord("z"): (0.0, 0.0, -speed),
+            glfw.KEY_PERIOD: (0.0, 0.0, speed),
+            glfw.KEY_COMMA: (0.0, 0.0, -speed),
+            ord("."): (0.0, 0.0, speed),
+            ord(","): (0.0, 0.0, -speed),
         }
         if keycode in mapping:
             self._manual_target_velocity[:] = mapping[keycode]
@@ -414,7 +412,7 @@ class VisualServoSimulation:
         height = int(width * self.config.camera.height / self.config.camera.width)
         height = min(height, max(180, int(viewport.height * 0.46)))
         x = max(0, int(viewport.width - width - 12))
-        y = 12
+        y = max(0, int(viewport.height - height - 12))
         rect_key = (x, y, width, height)
         if self._latest_overlay_rgb is not None and self._overlay_rect_key == rect_key:
             return

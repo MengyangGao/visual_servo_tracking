@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+import numpy as np
 import pytest
 
 from ._bootstrap import SRC  # noqa: F401
@@ -76,7 +79,35 @@ def test_viewer_key_controls_use_requested_shortcuts() -> None:
     app = VisualServoSimulation(cfg)
     app._handle_key(ord("l"))
     assert app._mouse_drag_enabled
-    app._handle_key(glfw.KEY_X)
+    app._handle_key(glfw.KEY_PERIOD)
     assert app._manual_target_velocity[2] > 0.0
-    app._handle_key(glfw.KEY_Z)
+    app._handle_key(glfw.KEY_COMMA)
     assert app._manual_target_velocity[2] < 0.0
+
+
+def test_camera_overlay_uses_top_right_viewport_origin() -> None:
+    @dataclass
+    class Viewport:
+        width: int
+        height: int
+
+    class FakeViewer:
+        viewport = Viewport(width=1000, height=800)
+
+        def __init__(self) -> None:
+            self.rect = None
+            self.image = None
+
+        def set_images(self, viewport_image) -> None:
+            self.rect, self.image = viewport_image
+
+    cfg = DemoConfig(target="cup", trajectory="static", detector="oracle", steps=1, headless=True, viewer=False, realtime=False)
+    app = VisualServoSimulation(cfg)
+    app._latest_overlay_bgr = np.zeros((480, 640, 3), dtype=np.uint8)
+    viewer = FakeViewer()
+    app._update_viewer_overlay(viewer)
+    assert viewer.rect is not None
+    assert viewer.rect.left == 568
+    assert viewer.rect.bottom == 473
+    assert viewer.rect.width == 420
+    assert viewer.rect.height == 315
