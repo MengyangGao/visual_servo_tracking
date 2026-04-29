@@ -392,7 +392,7 @@ class VisualServoSimulation:
             cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 255), 2)
         if detection is not None and detection.centroid_px is not None:
             center = tuple(detection.centroid_px.astype(int))
-            cv2.circle(image, center, 4, (0, 0, 255), -1)
+            cv2.drawMarker(image, center, (255, 255, 255), cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
         label = f"{self.detector_name} pending" if pending else f"{self.detector_name}"
         if detection is not None:
             label = f"{detection.backend} score={detection.score:.2f}"
