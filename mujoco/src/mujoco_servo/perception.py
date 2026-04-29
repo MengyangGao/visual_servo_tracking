@@ -153,7 +153,7 @@ class SemanticPerception:
         self._gdino_model = GroundingDinoForObjectDetection.from_pretrained(os.getenv("MUJOCO_SERVO_GDINO_MODEL", "IDEA-Research/grounding-dino-tiny"))
         self._sam_processor = SamProcessor.from_pretrained(os.getenv("MUJOCO_SERVO_SAM_MODEL", "facebook/sam-vit-base"))
         self._sam_model = SamModel.from_pretrained(os.getenv("MUJOCO_SERVO_SAM_MODEL", "facebook/sam-vit-base"))
-        device = os.getenv("MUJOCO_SERVO_DEVICE", "cpu")
+        device = os.getenv("MUJOCO_SERVO_DEVICE", "auto")
         if device == "auto":
             device = "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() else "cpu"
         self._device = torch.device(device)
@@ -170,11 +170,11 @@ class SemanticPerception:
         if not text.endswith("."):
             text = f"{text}."
         with self._torch.no_grad():
-            inputs = self._gdino_processor(images=image, text=text, return_tensors="pt").to(self._device)
+            inputs = self._to_device(self._gdino_processor(images=image, text=text, return_tensors="pt"))
             outputs = self._gdino_model(**inputs)
             results = self._gdino_processor.post_process_grounded_object_detection(
                 outputs,
-                inputs.input_ids,
+                inputs["input_ids"],
                 threshold=self._box_threshold,
                 text_threshold=self._text_threshold,
                 target_sizes=[image.size[::-1]],
@@ -202,7 +202,7 @@ class SemanticPerception:
     def _sam_mask(self, image, bbox: np.ndarray) -> np.ndarray:
         box = np.asarray(bbox, dtype=float).reshape(4).tolist()
         with self._torch.no_grad():
-            inputs = self._sam_processor(image, input_boxes=[[[box]]], return_tensors="pt").to(self._device)
+            inputs = self._to_device(self._sam_processor(image, input_boxes=[[[box]]], return_tensors="pt"))
             outputs = self._sam_model(**inputs)
             masks = self._sam_processor.image_processor.post_process_masks(
                 outputs.pred_masks.detach().cpu(),
@@ -211,6 +211,17 @@ class SemanticPerception:
             )[0]
         mask = masks[0, 0].numpy().astype(np.uint8) * 255
         return mask
+
+    def _to_device(self, inputs):
+        converted = {}
+        for key, value in inputs.items():
+            if self._torch.is_tensor(value):
+                if value.is_floating_point():
+                    value = value.to(dtype=self._torch.float32)
+                converted[key] = value.to(self._device)
+            else:
+                converted[key] = value
+        return converted
 
 
 def build_perception(name: str) -> PerceptionBackend:

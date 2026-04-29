@@ -6,6 +6,8 @@ Update: replace the procedural fallback robot as the default with Google DeepMin
 
 Update 2: remove the procedural arm fallback entirely, make Menagerie Panda mandatory, add camera-derived semantic perception, expand word-addressable target objects, and add a horizontal front standoff task with CLI distance control.
 
+Update 3: refine viewer interaction by unlocking the camera, hiding perturb visualization by default, adding toggleable mouse target drag, making keyboard target motion continuous, improving initial Panda pose, and throttling semantic perception.
+
 # User Value
 
 - Run a direct demo with `python scripts/demo.py` or `mjpython scripts/demo.py`.
@@ -29,6 +31,7 @@ Update 2: remove the procedural arm fallback entirely, make Menagerie Panda mand
 - [ASSUMPTION] The submodule path should be `mujoco/vendor/mujoco_menagerie` so all model assets stay under `mujoco/`.
 - [ASSUMPTION] For camera-based semantic perception, the command loop may use rendered RGB-D from the fixed MuJoCo camera to estimate 3D target position from masks/bounding boxes.
 - [ASSUMPTION] "EE horizontal and facing the object at x cm" means the gripper tool axis points horizontally toward the target, with the EE placed `x` centimeters away from the target along the horizontal line from robot base to object.
+- [ASSUMPTION] MuJoCo viewer mouse camera control should remain the default; target mouse dragging should be explicitly toggled so it does not steal camera interaction.
 - [ASSUMPTION] The default high-quality demo should use oracle/simulation perception for stable closed-loop behavior, with image-based color segmentation available as a lightweight detector.
 - [ASSUMPTION] Advanced semantic backends such as Grounding DINO / SAM2 should be represented by a pluggable interface and optional dependency path, not required for the base demo.
 - [ASSUMPTION] The first acceptance target is contact tracking: the EE center converges to the target center with a small configurable radius.
@@ -88,6 +91,11 @@ Update 2: remove the procedural arm fallback entirely, make Menagerie Panda mand
 15. Add camera observation plumbing: rendered RGB, rendered depth, intrinsics, and camera pose.
 16. Implement semantic perception using Grounding DINO for open-vocabulary boxes and SAM/SAM2-compatible mask extraction when optional dependencies are installed.
 17. Add `front-standoff` task mode with CLI distance in centimeters and 6D pose control.
+18. Disable per-frame viewer camera rewrites and only set initial camera once.
+19. Disable perturb/select visualization by default; expose a key toggle for target mouse dragging.
+20. Replace discrete WASD/QE target nudges with continuous arrow/PageUp/PageDown velocity control.
+21. Move the Panda start pose higher and away from the object approach path.
+22. Set semantic device selection to auto and throttle expensive Grounding DINO + SAM inference.
 
 # Validation
 
@@ -107,6 +115,8 @@ Update 2: remove the procedural arm fallback entirely, make Menagerie Panda mand
 6. Menagerie actuator types/ranges may differ from the fallback model, so commands must map to named Panda actuators rather than assuming actuator order.
 7. Grounding DINO/SAM downloads are large and may be slow on first run; tests should validate wiring without requiring model weights.
 8. Depth unprojection depends on MuJoCo camera conventions; validate with color detector smoke tests against oracle behavior.
+9. Passive viewer key callbacks do not expose key release events, so continuous target motion uses short velocity holds refreshed by key repeat.
+10. Mouse target dragging shares MuJoCo's perturb mechanism; keeping it off by default preserves normal camera orbit behavior.
 
 # Risks
 

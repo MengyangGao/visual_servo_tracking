@@ -49,6 +49,10 @@ class VisualServoSimulation:
         self._substeps = max(1, int(round((1.0 / config.controller.control_hz) / self.scene.model.opt.timestep)))
         self._renderer = None
         self._manual_target_offset = np.zeros(3, dtype=float)
+        self._manual_target_velocity = np.zeros(3, dtype=float)
+        self._manual_velocity_until = 0.0
+        self._last_target_update_time: float | None = None
+        self._mouse_drag_enabled = False
         self._viewer_camera_initialized = False
 
     def run(self) -> RunSummary:
@@ -126,9 +130,10 @@ class VisualServoSimulation:
                 self._apply_viewer_target_drag(viewer, target_pos)
                 target_pos = site_position(model, data, self.scene.target_site_name)
 
-            observation = self._render_camera_observation()
-            detection = self.perception.detect(observation, target_pos, self.target, self.config.target)
-            if detection.success and detection.target_position is not None:
+            should_detect = self._should_run_detector(step, last_observed_target)
+            observation = self._render_camera_observation() if should_detect else None
+            detection = self.perception.detect(observation, target_pos, self.target, self.config.target) if should_detect else None
+            if detection is not None and detection.success and detection.target_position is not None:
                 last_observed_target = detection.target_position.copy()
             if last_observed_target is not None:
                 command_target = last_observed_target
@@ -175,7 +180,26 @@ class VisualServoSimulation:
         )
 
     def _target_position(self, time_s: float) -> np.ndarray:
+        self._integrate_manual_target_velocity(time_s)
         return self.motion.position(time_s) + self._manual_target_offset
+
+    def _integrate_manual_target_velocity(self, time_s: float) -> None:
+        if self._last_target_update_time is None:
+            self._last_target_update_time = time_s
+            return
+        dt = max(0.0, min(0.05, time_s - self._last_target_update_time))
+        self._last_target_update_time = time_s
+        if time_s > self._manual_velocity_until:
+            self._manual_target_velocity[:] = 0.0
+            return
+        self._manual_target_offset += self._manual_target_velocity * dt
+
+    def _should_run_detector(self, step: int, last_observed_target: np.ndarray | None) -> bool:
+        if self.perception.name != "semantic":
+            return True
+        if last_observed_target is None:
+            return True
+        return step % max(1, int(self.config.semantic_interval)) == 0
 
     def _initialize_viewer(self, viewer) -> None:
         if self._viewer_camera_initialized:
@@ -187,9 +211,9 @@ class VisualServoSimulation:
         viewer.cam.distance = 1.35
         viewer.cam.azimuth = 132.0
         viewer.cam.elevation = -24.0
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_SELECT] = True
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = True
-        self._select_target_for_perturb(viewer)
+        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_SELECT] = False
+        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = False
+        self._clear_target_perturb(viewer)
         self._viewer_camera_initialized = True
 
     def _select_target_for_perturb(self, viewer) -> None:
@@ -203,8 +227,14 @@ class VisualServoSimulation:
         viewer.perturb.localpos[:] = 0.0
         viewer.perturb.scale = 0.25
 
+    def _clear_target_perturb(self, viewer) -> None:
+        viewer.perturb.select = 0
+        viewer.perturb.active = 0
+        viewer.perturb.active2 = 0
+
     def _apply_viewer_target_drag(self, viewer, scripted_target: np.ndarray) -> None:
-        if not self.config.interactive_target:
+        if not self.config.interactive_target or not self._mouse_drag_enabled:
+            self._clear_target_perturb(viewer)
             return
         body_id = mujoco.mj_name2id(self.scene.model, mujoco.mjtObj.mjOBJ_BODY, self.scene.target_body_name)
         if body_id < 0:
@@ -222,25 +252,25 @@ class VisualServoSimulation:
             import glfw
         except Exception:
             return
-        step = float(self.config.key_step_m)
+        if keycode == glfw.KEY_F2:
+            self._mouse_drag_enabled = not self._mouse_drag_enabled
+            return
+        speed = float(self.config.key_speed_mps)
         mapping = {
-            glfw.KEY_LEFT: np.array([0.0, step, 0.0], dtype=float),
-            glfw.KEY_RIGHT: np.array([0.0, -step, 0.0], dtype=float),
-            glfw.KEY_UP: np.array([step, 0.0, 0.0], dtype=float),
-            glfw.KEY_DOWN: np.array([-step, 0.0, 0.0], dtype=float),
-            glfw.KEY_PAGE_UP: np.array([0.0, 0.0, step], dtype=float),
-            glfw.KEY_PAGE_DOWN: np.array([0.0, 0.0, -step], dtype=float),
-            glfw.KEY_W: np.array([step, 0.0, 0.0], dtype=float),
-            glfw.KEY_S: np.array([-step, 0.0, 0.0], dtype=float),
-            glfw.KEY_A: np.array([0.0, step, 0.0], dtype=float),
-            glfw.KEY_D: np.array([0.0, -step, 0.0], dtype=float),
-            glfw.KEY_Q: np.array([0.0, 0.0, step], dtype=float),
-            glfw.KEY_E: np.array([0.0, 0.0, -step], dtype=float),
+            glfw.KEY_LEFT: np.array([0.0, speed, 0.0], dtype=float),
+            glfw.KEY_RIGHT: np.array([0.0, -speed, 0.0], dtype=float),
+            glfw.KEY_UP: np.array([speed, 0.0, 0.0], dtype=float),
+            glfw.KEY_DOWN: np.array([-speed, 0.0, 0.0], dtype=float),
+            glfw.KEY_PAGE_UP: np.array([0.0, 0.0, speed], dtype=float),
+            glfw.KEY_PAGE_DOWN: np.array([0.0, 0.0, -speed], dtype=float),
         }
         if keycode in mapping:
-            self._manual_target_offset += mapping[keycode]
+            self._manual_target_velocity = mapping[keycode]
+            self._manual_velocity_until = float(self.scene.data.time) + 0.22
         elif keycode in {glfw.KEY_SPACE, getattr(glfw, "KEY_BACKSPACE", -1)}:
             self._manual_target_offset[:] = 0.0
+            self._manual_target_velocity[:] = 0.0
+            self._manual_velocity_until = 0.0
 
 
 def run_demo(config: DemoConfig) -> RunSummary:

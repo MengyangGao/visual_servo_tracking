@@ -18,7 +18,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headless", action="store_true", help="run without the MuJoCo viewer")
     parser.add_argument("--no-realtime", action="store_true", help="do not sleep to match wall-clock time")
     parser.add_argument("--scripted-target", action="store_true", help="ignore interactive viewer target edits and use only the scripted trajectory")
-    parser.add_argument("--key-step-cm", type=float, default=2.5, help="keyboard target nudge step in centimeters")
+    parser.add_argument("--key-speed-cm-s", type=float, default=18.0, help="continuous keyboard target speed in centimeters per second")
+    parser.add_argument("--semantic-interval", type=int, default=10, help="run semantic Grounding DINO + SAM every N control frames")
     parser.add_argument("--standoff", type=float, default=None, help="standoff distance in meters")
     parser.add_argument("--standoff-cm", type=float, default=16.0, help="standoff distance in centimeters for standoff/front-standoff")
     parser.add_argument("--list-targets", action="store_true", help="print built-in target words and exit")
@@ -41,7 +42,8 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         viewer=not args.headless,
         realtime=not args.no_realtime,
         interactive_target=not args.scripted_target,
-        key_step_m=float(args.key_step_cm) / 100.0,
+        key_speed_mps=float(args.key_speed_cm_s) / 100.0,
+        semantic_interval=max(1, int(args.semantic_interval)),
         seed=args.seed,
         camera=camera,
         controller=controller,

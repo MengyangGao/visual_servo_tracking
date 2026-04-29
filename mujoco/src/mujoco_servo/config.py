@@ -69,7 +69,8 @@ class DemoConfig:
     viewer: bool = True
     realtime: bool = True
     interactive_target: bool = True
-    key_step_m: float = 0.025
+    key_speed_mps: float = 0.18
+    semantic_interval: int = 10
     seed: int = 7
     camera: CameraConfig = field(default_factory=CameraConfig)
     controller: ControllerConfig = field(default_factory=ControllerConfig)
@@ -84,7 +85,7 @@ def default_home_qpos() -> np.ndarray:
 
 
 def menagerie_home_qpos() -> np.ndarray:
-    return np.array([0.0, 0.4, 0.0, -1.85, 0.0, 2.25, -0.7853], dtype=float)
+    return np.array([0.0, -0.6, 0.0, -2.2, 0.0, 2.4, -0.7853], dtype=float)
 
 
 def available_tasks() -> tuple[str, ...]:
