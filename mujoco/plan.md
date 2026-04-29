@@ -8,6 +8,8 @@ Update 2: remove the procedural arm fallback entirely, make Menagerie Panda mand
 
 Update 3: refine viewer interaction by unlocking the camera, hiding perturb visualization by default, adding toggleable mouse target drag, making keyboard target motion continuous, improving initial Panda pose, and throttling semantic perception.
 
+Update 4: change semantic perception to Grounding DINO + SAM initialization followed by local mask/color/depth tracking, add a viewer camera overlay, and move conflicting shortcuts to `L` plus `[`/`]`.
+
 # User Value
 
 - Run a direct demo with `python scripts/demo.py` or `mjpython scripts/demo.py`.
@@ -96,6 +98,9 @@ Update 3: refine viewer interaction by unlocking the camera, hiding perturb visu
 20. Replace discrete WASD/QE target nudges with continuous arrow/PageUp/PageDown velocity control.
 21. Move the Panda start pose higher and away from the object approach path.
 22. Set semantic device selection to auto and throttle expensive Grounding DINO + SAM inference.
+23. Replace periodic semantic inference with one successful Grounding DINO + SAM initialization and per-frame local tracker reuse.
+24. Draw the robot camera stream into a top-right viewer overlay with mask, bbox, centroid, backend, score, and target label.
+25. Change mouse-drag toggle from F2 to `L`, and vertical target movement from PageUp/PageDown to `]`/`[`.
 
 # Validation
 
@@ -104,6 +109,9 @@ Update 3: refine viewer interaction by unlocking the camera, hiding perturb visu
 - `conda run -n visual_servo pytest mujoco/tests`
 - `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 240 --target cup --trajectory circle --task contact`
 - `git submodule status mujoco/vendor/mujoco_menagerie`
+- `conda run -n visual_servo python -m py_compile mujoco/src/mujoco_servo/app.py mujoco/src/mujoco_servo/cli.py mujoco/src/mujoco_servo/config.py mujoco/src/mujoco_servo/perception.py`
+- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 12 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
+- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target cup --trajectory static --task contact --detector color --no-realtime`
 
 # Overlooked Risks Or Edge Cases
 
@@ -117,6 +125,9 @@ Update 3: refine viewer interaction by unlocking the camera, hiding perturb visu
 8. Depth unprojection depends on MuJoCo camera conventions; validate with color detector smoke tests against oracle behavior.
 9. Passive viewer key callbacks do not expose key release events, so continuous target motion uses short velocity holds refreshed by key repeat.
 10. Mouse target dragging shares MuJoCo's perturb mechanism; keeping it off by default preserves normal camera orbit behavior.
+11. Semantic local tracking can drift if another object with a similar HSV profile enters the ROI; failed/degraded masks should fall back to Grounding DINO + SAM reinitialization.
+12. Viewer image overlay support depends on MuJoCo Python viewer versions that expose `Handle.set_images`; validated locally against MuJoCo 3.8.0.
+13. The viewer overlay is not visible in headless validation, so manual `mjpython` GUI smoke testing remains useful for layout and interaction feel.
 
 # Risks
 

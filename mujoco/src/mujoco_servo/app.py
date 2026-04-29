@@ -4,6 +4,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 
+import cv2
 import mujoco
 import numpy as np
 
@@ -54,6 +55,7 @@ class VisualServoSimulation:
         self._last_target_update_time: float | None = None
         self._mouse_drag_enabled = False
         self._viewer_camera_initialized = False
+        self._latest_overlay_bgr: np.ndarray | None = None
 
     def run(self) -> RunSummary:
         viewer = None
@@ -130,11 +132,11 @@ class VisualServoSimulation:
                 self._apply_viewer_target_drag(viewer, target_pos)
                 target_pos = site_position(model, data, self.scene.target_site_name)
 
-            should_detect = self._should_run_detector(step, last_observed_target)
-            observation = self._render_camera_observation() if should_detect else None
-            detection = self.perception.detect(observation, target_pos, self.target, self.config.target) if should_detect else None
+            observation = self._render_camera_observation()
+            detection = self.perception.detect(observation, target_pos, self.target, self.config.target)
             if detection is not None and detection.success and detection.target_position is not None:
                 last_observed_target = detection.target_position.copy()
+            self._latest_overlay_bgr = self._draw_camera_overlay(observation, detection, last_observed_target)
             if last_observed_target is not None:
                 command_target = last_observed_target
             elif self.perception.name == "oracle":
@@ -152,6 +154,7 @@ class VisualServoSimulation:
                 mujoco.mj_step(model, data)
 
             if viewer is not None:
+                self._update_viewer_overlay(viewer)
                 viewer.sync()
             if self.config.realtime and viewer is not None:
                 expected = (step + 1) / float(self.config.controller.control_hz)
@@ -193,13 +196,6 @@ class VisualServoSimulation:
             self._manual_target_velocity[:] = 0.0
             return
         self._manual_target_offset += self._manual_target_velocity * dt
-
-    def _should_run_detector(self, step: int, last_observed_target: np.ndarray | None) -> bool:
-        if self.perception.name != "semantic":
-            return True
-        if last_observed_target is None:
-            return True
-        return step % max(1, int(self.config.semantic_interval)) == 0
 
     def _initialize_viewer(self, viewer) -> None:
         if self._viewer_camera_initialized:
@@ -252,7 +248,7 @@ class VisualServoSimulation:
             import glfw
         except Exception:
             return
-        if keycode == glfw.KEY_F2:
+        if keycode == glfw.KEY_L:
             self._mouse_drag_enabled = not self._mouse_drag_enabled
             return
         speed = float(self.config.key_speed_mps)
@@ -261,8 +257,8 @@ class VisualServoSimulation:
             glfw.KEY_RIGHT: np.array([0.0, -speed, 0.0], dtype=float),
             glfw.KEY_UP: np.array([speed, 0.0, 0.0], dtype=float),
             glfw.KEY_DOWN: np.array([-speed, 0.0, 0.0], dtype=float),
-            glfw.KEY_PAGE_UP: np.array([0.0, 0.0, speed], dtype=float),
-            glfw.KEY_PAGE_DOWN: np.array([0.0, 0.0, -speed], dtype=float),
+            glfw.KEY_RIGHT_BRACKET: np.array([0.0, 0.0, speed], dtype=float),
+            glfw.KEY_LEFT_BRACKET: np.array([0.0, 0.0, -speed], dtype=float),
         }
         if keycode in mapping:
             self._manual_target_velocity = mapping[keycode]
@@ -271,6 +267,50 @@ class VisualServoSimulation:
             self._manual_target_offset[:] = 0.0
             self._manual_target_velocity[:] = 0.0
             self._manual_velocity_until = 0.0
+
+    def _draw_camera_overlay(
+        self,
+        observation: CameraObservation | None,
+        detection,
+        last_observed_target: np.ndarray | None,
+    ) -> np.ndarray | None:
+        if observation is None:
+            return None
+        image = observation.frame_bgr.copy()
+        if detection is not None and detection.mask is not None:
+            mask = detection.mask > 0
+            color = np.zeros_like(image)
+            color[:, :, 1] = 180
+            image[mask] = cv2.addWeighted(image[mask], 0.55, color[mask], 0.45, 0)
+        if detection is not None and detection.bbox_xyxy is not None:
+            x1, y1, x2, y2 = detection.bbox_xyxy.astype(int)
+            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        if detection is not None and detection.centroid_px is not None:
+            center = tuple(detection.centroid_px.astype(int))
+            cv2.circle(image, center, 4, (0, 0, 255), -1)
+        label = f"{self.perception.name}"
+        if detection is not None:
+            label = f"{detection.backend} score={detection.score:.2f}"
+        elif last_observed_target is not None:
+            label = f"{self.perception.name} reused"
+        cv2.putText(image, label, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(image, self.config.target, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        return image
+
+    def _update_viewer_overlay(self, viewer) -> None:
+        if not self.config.camera_overlay or self._latest_overlay_bgr is None:
+            return
+        viewport = viewer.viewport
+        if viewport is None or viewport.width <= 0 or viewport.height <= 0:
+            return
+        width = min(320, max(180, int(viewport.width * 0.28)))
+        height = int(width * self.config.camera.height / self.config.camera.width)
+        height = min(height, max(120, int(viewport.height * 0.30)))
+        x = max(0, int(viewport.width - width - 12))
+        y = max(0, int(viewport.height - height - 12))
+        overlay = cv2.resize(self._latest_overlay_bgr, (width, height), interpolation=cv2.INTER_AREA)
+        overlay_rgb = overlay[:, :, ::-1].copy()
+        viewer.set_images((mujoco.MjrRect(x, y, width, height), overlay_rgb))
 
 
 def run_demo(config: DemoConfig) -> RunSummary:

@@ -70,7 +70,7 @@ class DemoConfig:
     realtime: bool = True
     interactive_target: bool = True
     key_speed_mps: float = 0.18
-    semantic_interval: int = 10
+    camera_overlay: bool = True
     seed: int = 7
     camera: CameraConfig = field(default_factory=CameraConfig)
     controller: ControllerConfig = field(default_factory=ControllerConfig)

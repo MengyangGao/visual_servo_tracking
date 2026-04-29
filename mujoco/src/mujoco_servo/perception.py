@@ -161,10 +161,20 @@ class SemanticPerception:
         self._sam_model.to(self._device).eval()
         self._box_threshold = float(os.getenv("MUJOCO_SERVO_GDINO_BOX_THRESHOLD", "0.25"))
         self._text_threshold = float(os.getenv("MUJOCO_SERVO_GDINO_TEXT_THRESHOLD", "0.25"))
+        self._initialized = False
+        self._last_bbox: np.ndarray | None = None
+        self._last_mask: np.ndarray | None = None
+        self._last_detection: Detection | None = None
+        self._hsv_center: np.ndarray | None = None
 
     def detect(self, observation: CameraObservation | None, truth_position: np.ndarray, target: TargetSpec, prompt: str) -> Detection:
         if observation is None:
             return Detection(False, self.name, None)
+        if self._initialized:
+            tracked = self._track_from_last_mask(observation)
+            if tracked.success:
+                self._last_detection = tracked
+                return tracked
         image = self._image_cls.fromarray(observation.frame_bgr[:, :, ::-1])
         text = prompt.strip().lower()
         if not text.endswith("."):
@@ -189,7 +199,7 @@ class SemanticPerception:
         mask = self._sam_mask(image, bbox)
         position, mask = _estimate_world_position(observation, bbox, mask)
         x1, y1, x2, y2 = bbox
-        return Detection(
+        detection = Detection(
             success=position is not None,
             backend=self.name,
             target_position=position,
@@ -198,6 +208,13 @@ class SemanticPerception:
             centroid_px=np.array([0.5 * (x1 + x2), 0.5 * (y1 + y2)], dtype=float),
             mask=mask,
         )
+        if detection.success:
+            self._initialized = True
+            self._last_bbox = bbox.copy()
+            self._last_mask = mask.copy()
+            self._last_detection = detection
+            self._hsv_center = self._mask_hsv_center(observation.frame_bgr, mask)
+        return detection
 
     def _sam_mask(self, image, bbox: np.ndarray) -> np.ndarray:
         box = np.asarray(bbox, dtype=float).reshape(4).tolist()
@@ -211,6 +228,85 @@ class SemanticPerception:
             )[0]
         mask = masks[0, 0].numpy().astype(np.uint8) * 255
         return mask
+
+    def _track_from_last_mask(self, observation: CameraObservation) -> Detection:
+        if self._last_bbox is None:
+            return Detection(False, self.name, None)
+        mask = self._local_color_mask(observation.frame_bgr)
+        if mask is None:
+            mask = self._bbox_roi_mask(observation.frame_bgr.shape, self._last_bbox)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return Detection(False, self.name, None, mask=mask)
+        contour = max(contours, key=cv2.contourArea)
+        area = float(cv2.contourArea(contour))
+        if area < 16.0:
+            return Detection(False, self.name, None, mask=mask)
+        x, y, w, h = cv2.boundingRect(contour)
+        bbox = np.array([x, y, x + w, y + h], dtype=float)
+        position, mask = _estimate_world_position(observation, bbox, mask)
+        moments = cv2.moments(contour)
+        cx = x + 0.5 * w if abs(moments["m00"]) < 1e-9 else moments["m10"] / moments["m00"]
+        cy = y + 0.5 * h if abs(moments["m00"]) < 1e-9 else moments["m01"] / moments["m00"]
+        detection = Detection(
+            success=position is not None,
+            backend=f"{self.name}-track",
+            target_position=position,
+            score=float(self._last_detection.score if self._last_detection is not None else 0.5),
+            bbox_xyxy=bbox,
+            centroid_px=np.array([cx, cy], dtype=float),
+            mask=mask,
+        )
+        if detection.success:
+            self._last_bbox = bbox.copy()
+            self._last_mask = mask.copy()
+            self._last_detection = detection
+        return detection
+
+    def _local_color_mask(self, frame_bgr: np.ndarray) -> np.ndarray | None:
+        if self._last_bbox is None or self._hsv_center is None:
+            return None
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        x1, y1, x2, y2 = self._expanded_bbox(frame_bgr.shape, self._last_bbox, 1.2)
+        hue = int(self._hsv_center[0])
+        sat = int(self._hsv_center[1])
+        val = int(self._hsv_center[2])
+        lower = np.array([max(0, hue - 14), max(35, sat - 70), max(25, val - 90)], dtype=np.uint8)
+        upper = np.array([min(179, hue + 14), 255, 255], dtype=np.uint8)
+        roi = cv2.inRange(hsv[y1:y2, x1:x2], lower, upper)
+        mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+        mask[y1:y2, x1:x2] = roi
+        kernel = np.ones((5, 5), dtype=np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    def _bbox_roi_mask(self, frame_shape: tuple[int, int, int], bbox: np.ndarray) -> np.ndarray:
+        x1, y1, x2, y2 = self._expanded_bbox(frame_shape, bbox, 0.35)
+        mask = np.zeros(frame_shape[:2], dtype=np.uint8)
+        mask[y1:y2, x1:x2] = 255
+        return mask
+
+    @staticmethod
+    def _expanded_bbox(frame_shape: tuple[int, int, int], bbox: np.ndarray, scale: float) -> tuple[int, int, int, int]:
+        h, w = frame_shape[:2]
+        x1, y1, x2, y2 = np.asarray(bbox, dtype=float).reshape(4)
+        cx = 0.5 * (x1 + x2)
+        cy = 0.5 * (y1 + y2)
+        half_w = max(8.0, 0.5 * (x2 - x1) * (1.0 + scale))
+        half_h = max(8.0, 0.5 * (y2 - y1) * (1.0 + scale))
+        left = max(0, min(w - 1, int(cx - half_w)))
+        right = max(left + 1, min(w, int(cx + half_w)))
+        top = max(0, min(h - 1, int(cy - half_h)))
+        bottom = max(top + 1, min(h, int(cy + half_h)))
+        return left, top, right, bottom
+
+    @staticmethod
+    def _mask_hsv_center(frame_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray | None:
+        valid = mask > 0
+        if not np.any(valid):
+            return None
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        return np.median(hsv[valid], axis=0)
 
     def _to_device(self, inputs):
         converted = {}
