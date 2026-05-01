@@ -90,12 +90,13 @@ class VisualServoSimulation:
         if self.config.viewer and not self.config.headless:
             viewer = self._try_open_viewer()
         try:
+            self._prepare_perception_for_run(viewer)
             if self._uses_async_perception(viewer):
                 self._perception_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mujoco-servo-perception")
             summary = self._run_loop(viewer)
         finally:
             if self._perception_executor is not None:
-                self._perception_executor.shutdown(wait=False, cancel_futures=True)
+                self._perception_executor.shutdown(wait=True, cancel_futures=True)
                 self._perception_executor = None
             if viewer is not None:
                 viewer.close()
@@ -187,15 +188,20 @@ class VisualServoSimulation:
             if self.detector_name != "oracle" and detection is not None and detection.success and detection.target_position is not None:
                 last_observed_target = detection.target_position.copy()
                 perception_updates += 1
+            hold_command = False
             if last_observed_target is not None:
                 command_target = last_observed_target
             elif self.detector_name == "oracle":
                 command_target = target_pos
                 oracle_truth_steps += 1
             else:
-                command_target = frame_position(model, data, self.scene.ee_frame_type, self.scene.ee_frame_name, self.scene.ee_frame_offset)
+                command_target = None
+                hold_command = True
                 hold_steps += 1
-            last_state = self.controller.step(data, command_target, time_s, step, self._control_dt_s)
+            if hold_command:
+                last_state = self.controller.hold(data, time_s, step)
+            else:
+                last_state = self.controller.step(data, command_target, time_s, step, self._control_dt_s)
             errors.append(last_state.position_error_m)
 
             for _ in range(self._substeps):
@@ -248,7 +254,13 @@ class VisualServoSimulation:
         return viewer is not None and self.detector_name != "oracle"
 
     def _should_lazy_load_perception(self) -> bool:
-        return self.detector_name == "semantic" and self.config.viewer and not self.config.headless
+        return False
+
+    def _prepare_perception_for_run(self, viewer) -> None:
+        if self.detector_name != "semantic" or self.perception is None:
+            return
+        if viewer is not None:
+            print("semantic models loaded on the main thread; inference will run asynchronously")
 
     def _ensure_perception(self) -> PerceptionBackend:
         if self.perception is None:

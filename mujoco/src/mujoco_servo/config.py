@@ -15,8 +15,8 @@ MENAGERIE_PANDA_ASSETS = MENAGERIE_HOME / "franka_emika_panda" / "assets"
 @dataclass(frozen=True)
 class CameraConfig:
     name: str = "servo_camera"
-    width: int = 640
-    height: int = 480
+    width: int = 424
+    height: int = 320
     fovy_deg: float = 45.0
     position: tuple[float, float, float] = (0.85, -1.15, 0.85)
     lookat: tuple[float, float, float] = (0.45, 0.0, 0.35)

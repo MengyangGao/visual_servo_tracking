@@ -56,9 +56,10 @@ conda run -n visual_servo mjpython mujoco/scripts/demo.py \
   --standoff-cm 10 \
   --detector semantic \
   --depth-backend mujoco \
-  --camera-fps 6 \
-  --steps 1000000
+  --camera-fps 3
 ```
+
+The first semantic run can pause while Hugging Face weights load. On macOS, model loading is intentionally done on the main thread before the MuJoCo viewer starts; inference then runs asynchronously so the viewer does not crash on AppKit main-thread checks. Viewer runs default to a long session, so `--steps` is usually unnecessary.
 
 Use learned monocular depth when you want to test camera-only depth behavior. This is slower than MuJoCo metric depth, so keep `--camera-fps` modest:
 
@@ -71,8 +72,7 @@ conda run -n visual_servo mjpython mujoco/scripts/demo.py \
   --detector semantic \
   --depth-backend depth-anything-v2 \
   --depth-model depth-anything/Depth-Anything-V2-Small-hf \
-  --camera-fps 2 \
-  --steps 1000000
+  --camera-fps 1
 ```
 
 Debug-only oracle smoke run, useful when validating robot/control changes without model downloads:
@@ -118,6 +118,8 @@ Target offsets are keyboard-controlled.
 - `--depth-device`: `auto`, `cpu`, `mps`, or `cuda`.
 - `--no-depth-metric-hint`: disables MuJoCo metric-depth calibration for learned depth.
 - `--camera-fps`: robot-camera processing rate in viewer mode.
+- `--camera-width`, `--camera-height`: robot-camera render size; defaults are `424x320` to keep semantic runs responsive.
+- `--steps`: control steps; defaults to `1000000` with the viewer and `1200` in headless mode.
 - `--overlay-width-frac`: top-right overlay width as a fraction of viewer width.
 - `--no-camera-overlay`: hide the robot-camera overlay.
 - `--list-targets`: print built-in target names.

@@ -135,10 +135,17 @@ def test_alternate_robot_headless_smoke() -> None:
     assert summary.steps == 20
 
 
-def test_semantic_viewer_mode_lazily_loads_backend() -> None:
+def test_semantic_viewer_mode_loads_backend_on_main_thread(monkeypatch) -> None:
+    class FakeSemantic:
+        name = "semantic"
+
+        def detect(self, observation, truth_position, target, prompt):
+            return Detection(False, self.name, None)
+
+    monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
     cfg = DemoConfig(target="apple", trajectory="static", detector="semantic", steps=1, headless=False, viewer=True, realtime=False)
     app = VisualServoSimulation(cfg)
-    assert app.perception is None
+    assert app.perception is not None
     assert app.detector_name == "semantic"
 
 
@@ -192,11 +199,11 @@ def test_camera_overlay_uses_top_right_viewport_origin() -> None:
 
     cfg = DemoConfig(target="cup", trajectory="static", detector="oracle", steps=1, headless=True, viewer=False, realtime=False)
     app = VisualServoSimulation(cfg)
-    app._latest_overlay_bgr = np.zeros((480, 640, 3), dtype=np.uint8)
+    app._latest_overlay_bgr = np.zeros((cfg.camera.height, cfg.camera.width, 3), dtype=np.uint8)
     viewer = FakeViewer()
     app._update_viewer_overlay(viewer)
     assert viewer.rect is not None
     assert viewer.rect.left == 568
-    assert viewer.rect.bottom == 473
+    assert viewer.rect.bottom == 472
     assert viewer.rect.width == 420
-    assert viewer.rect.height == 315
+    assert viewer.rect.height == 316

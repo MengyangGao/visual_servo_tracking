@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--depth-model", default="depth-anything/Depth-Anything-V2-Small-hf", help="Hugging Face model for --depth-backend depth-anything-v2")
     parser.add_argument("--depth-device", default="auto", help="device for optional learned depth backend: auto, cpu, mps, or cuda")
     parser.add_argument("--no-depth-metric-hint", action="store_true", help="do not calibrate learned depth with MuJoCo metric depth")
-    parser.add_argument("--steps", type=int, default=1200, help="control steps to run")
+    parser.add_argument("--steps", type=int, default=None, help="control steps to run; defaults to 1000000 with viewer, 1200 headless")
     parser.add_argument("--headless", action="store_true", help="run without the MuJoCo viewer")
     parser.add_argument("--no-realtime", action="store_true", help="do not sleep to match wall-clock time")
     parser.add_argument("--scripted-target", action="store_true", help="disable keyboard target offsets and use only the scripted trajectory")
@@ -33,8 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--standoff-cm", type=float, default=16.0, help="standoff distance in centimeters for standoff/front-standoff")
     parser.add_argument("--list-targets", action="store_true", help="print built-in target words and exit")
     parser.add_argument("--seed", type=int, default=7, help="random seed for random-walk trajectory")
-    parser.add_argument("--camera-width", type=int, default=640)
-    parser.add_argument("--camera-height", type=int, default=480)
+    parser.add_argument("--camera-width", type=int, default=424)
+    parser.add_argument("--camera-height", type=int, default=320)
     return parser
 
 
@@ -54,7 +54,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         target_file=args.target_file,
         trajectory=args.trajectory,
         detector=args.detector,
-        steps=args.steps,
+        steps=int(args.steps) if args.steps is not None else (1200 if args.headless else 1_000_000),
         headless=args.headless,
         viewer=not args.headless,
         realtime=not args.no_realtime,

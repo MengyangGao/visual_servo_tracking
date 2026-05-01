@@ -11,8 +11,29 @@ from .config import TargetPart, TargetSpec
 
 
 TARGETS: dict[str, TargetSpec] = {
-    "cup": TargetSpec("cup", "cylinder", (0.075, 0.075, 0.105), (0.95, 0.32, 0.18, 1.0), ("mug", "red cup")),
-    "apple": TargetSpec("apple", "sphere", (0.075, 0.075, 0.075), (0.9, 0.08, 0.10, 1.0), ("red apple", "fruit")),
+    "cup": TargetSpec(
+        "cup",
+        "compound",
+        (0.095, 0.075, 0.105),
+        (0.95, 0.32, 0.18, 1.0),
+        ("mug", "red cup"),
+        parts=(
+            TargetPart("cylinder", (0.075, 0.075, 0.105), rgba=(0.95, 0.32, 0.18, 1.0)),
+            TargetPart("capsule", (0.014, 0.014, 0.070), pos=(0.048, 0.0, 0.005), rgba=(0.95, 0.32, 0.18, 1.0), quat=(0.7071, 0.0, 0.7071, 0.0)),
+        ),
+    ),
+    "apple": TargetSpec(
+        "apple",
+        "compound",
+        (0.085, 0.085, 0.105),
+        (0.9, 0.08, 0.10, 1.0),
+        ("red apple", "fruit"),
+        parts=(
+            TargetPart("sphere", (0.080, 0.080, 0.080), rgba=(0.9, 0.08, 0.10, 1.0)),
+            TargetPart("capsule", (0.010, 0.010, 0.038), pos=(0.0, 0.0, 0.052), rgba=(0.34, 0.18, 0.08, 1.0)),
+            TargetPart("box", (0.035, 0.014, 0.006), pos=(0.020, 0.0, 0.066), rgba=(0.12, 0.55, 0.16, 1.0), quat=(0.9239, 0.0, 0.3827, 0.0)),
+        ),
+    ),
     "box": TargetSpec("box", "box", (0.11, 0.085, 0.09), (0.18, 0.45, 0.92, 1.0), ("blue box", "cube", "block")),
     "bottle": TargetSpec("bottle", "cylinder", (0.052, 0.052, 0.22), (0.10, 0.55, 0.85, 1.0), ("blue bottle",)),
     "phone": TargetSpec("phone", "box", (0.075, 0.014, 0.145), (0.08, 0.08, 0.09, 1.0), ("mobile", "black phone")),

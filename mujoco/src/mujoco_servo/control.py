@@ -104,6 +104,26 @@ class ResolvedRateController:
         self._qpos_command = np.array(data.qpos[self._qpos_adr], dtype=float)
         self._filtered_target = None
 
+    def hold(self, data: mujoco.MjData, time_s: float, step_index: int) -> ServoState:
+        ee_pos = frame_position(self.model, data, self.ee_frame_type, self.ee_frame_name, self.ee_frame_offset)
+        current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
+        self._qpos_command = current_qpos.copy()
+        for i, actuator_id in enumerate(self._actuator_ids):
+            data.ctrl[actuator_id] = self._qpos_command[i]
+        for actuator_id, value in self._passive_actuator_ids:
+            data.ctrl[actuator_id] = value
+        return ServoState(
+            step=step_index,
+            time_s=time_s,
+            ee_position=ee_pos,
+            target_position=ee_pos.copy(),
+            desired_position=ee_pos.copy(),
+            position_error_m=0.0,
+            target_distance_m=0.0,
+            orientation_error_rad=0.0,
+            qpos_command=self._qpos_command.copy(),
+        )
+
     def step(self, data: mujoco.MjData, target_position: np.ndarray, time_s: float, step_index: int, dt: float | None = None) -> ServoState:
         target = np.asarray(target_position, dtype=float).reshape(3)
         if self._filtered_target is None:
