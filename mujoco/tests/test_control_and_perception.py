@@ -7,7 +7,7 @@ from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.config import ControllerConfig
 from mujoco_servo.control import ResolvedRateController, desired_ee_position
-from mujoco_servo.perception import CameraIntrinsics, CameraObservation, ColorSegmentationPerception, OraclePerception, SemanticPerception
+from mujoco_servo.perception import CameraIntrinsics, CameraObservation, ColorSegmentationPerception, OraclePerception, SemanticPerception, _estimate_world_position
 from mujoco_servo.scene import build_scene
 from mujoco_servo.targets import resolve_target
 
@@ -53,11 +53,30 @@ def test_color_segmentation_detects_render_like_blob() -> None:
     assert detection.success
     assert detection.bbox_xyxy is not None
     assert detection.centroid_px is not None
-    assert detection.anchor_type == "visible_bbox_center"
+    assert detection.anchor_type == "depth_mask_centroid"
     assert detection.world_bbox_min is not None
     assert detection.world_bbox_max is not None
     assert 105 < detection.centroid_px[0] < 120
     assert 80 < detection.centroid_px[1] < 100
+
+
+def test_depth_anchor_rejects_mask_depth_outliers() -> None:
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    depth = np.ones((100, 100), dtype=np.float32)
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[40:60, 40:60] = 255
+    depth[40, 40] = 10.0
+    observation = CameraObservation(
+        frame_bgr=image,
+        depth_m=depth,
+        intrinsics=CameraIntrinsics(fx=100.0, fy=100.0, cx=50.0, cy=50.0, width=100, height=100),
+        camera_position=np.zeros(3, dtype=float),
+        camera_xmat=np.eye(3, dtype=float),
+    )
+    position, _, bbox_min, bbox_max, anchor_type = _estimate_world_position(observation, np.array([40, 40, 60, 60], dtype=float), mask)
+    assert anchor_type == "depth_mask_centroid"
+    assert np.linalg.norm(position - np.array([-0.005, 0.005, -1.0])) < 0.02
+    assert bbox_max[2] < -0.9
 
 
 def test_semantic_detect_reuses_initialized_local_tracker_without_models() -> None:

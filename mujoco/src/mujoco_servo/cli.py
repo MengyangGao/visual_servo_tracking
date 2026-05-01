@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scripted-target", action="store_true", help="disable keyboard target offsets and use only the scripted trajectory")
     parser.add_argument("--key-speed-cm-s", type=float, default=18.0, help="continuous keyboard target speed in centimeters per second")
     parser.add_argument("--semantic-interval", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--debug-perception", action="store_true", help="print semantic/depth detection diagnostics")
     parser.add_argument("--no-camera-overlay", action="store_true", help="hide the robot camera overlay in the MuJoCo viewer")
     parser.add_argument("--camera-fps", type=float, default=6.0, help="robot camera processing rate in viewer mode")
     parser.add_argument("--overlay-width-frac", type=float, default=0.42, help="fraction of viewer width used by the camera overlay")
@@ -61,6 +62,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         manual_control=not args.scripted_target,
         key_speed_mps=float(args.key_speed_cm_s) / 100.0,
         camera_overlay=not args.no_camera_overlay,
+        debug_perception=bool(args.debug_perception),
         camera_fps=max(0.5, float(args.camera_fps)),
         overlay_width_fraction=min(0.75, max(0.15, float(args.overlay_width_frac))),
         seed=args.seed,

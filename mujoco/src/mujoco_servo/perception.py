@@ -76,6 +76,7 @@ def _estimate_world_position(
     depth = np.asarray(observation.depth_m, dtype=float)
     valid &= np.isfinite(depth)
     valid &= depth > 0.0
+    valid = _trim_depth_outliers(depth, valid)
     if not np.any(valid):
         x1, y1, x2, y2 = np.asarray(bbox_xyxy, dtype=float).reshape(4)
         u = 0.5 * (x1 + x2)
@@ -101,10 +102,19 @@ def _estimate_world_position(
         world_points = _pixels_depth_to_world(observation, xs_sample, ys_sample, depth[ys_sample, xs_sample])
         bbox_min = np.min(world_points, axis=0)
         bbox_max = np.max(world_points, axis=0)
-        visible_center = 0.5 * (bbox_min + bbox_max)
         surface_centroid = _pixel_depth_to_world(observation, u, v, z)
-        anchor = 0.65 * visible_center + 0.35 * surface_centroid
-        return anchor, mask, bbox_min, bbox_max, "visible_bbox_center"
+        return surface_centroid, mask, bbox_min, bbox_max, "depth_mask_centroid"
+
+
+def _trim_depth_outliers(depth: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    values = depth[valid]
+    if values.size < 16:
+        return valid
+    lo, hi = np.percentile(values, [2.0, 95.0])
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return valid
+    trimmed = valid & (depth >= lo) & (depth <= hi)
+    return trimmed if np.any(trimmed) else valid
 
 
 def _pixel_depth_to_world(observation: CameraObservation, u: float, v: float, z: float) -> np.ndarray:

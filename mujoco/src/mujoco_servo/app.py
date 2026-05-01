@@ -31,6 +31,7 @@ class RunSummary:
     min_error_m: float
     max_error_m: float
     perception_updates: int
+    rejected_detections: int
     hold_steps: int
     oracle_truth_steps: int
     truth_fallback_steps: int
@@ -80,6 +81,7 @@ class VisualServoSimulation:
         self._perception_future: Future[tuple[CameraObservation, Detection]] | None = None
         self._last_detection: Detection | None = None
         self._last_detection_wall_time: float | None = None
+        self._last_accepted_detection_position: np.ndarray | None = None
         self._perception_disabled = False
         self._control_dt_s = self._substeps * float(self.scene.model.opt.timestep)
         self._camera_render_times_ms: list[float] = []
@@ -173,6 +175,7 @@ class VisualServoSimulation:
         oracle_truth_steps = 0
         truth_fallback_steps = 0
         perception_updates = 0
+        rejected_detections = 0
         last_state: ServoState | None = None
         last_observed_target: np.ndarray | None = None
         wall_start = time.perf_counter()
@@ -186,8 +189,14 @@ class VisualServoSimulation:
 
             detection = self._update_perception(viewer, target_pos)
             if self.detector_name != "oracle" and detection is not None and detection.success and detection.target_position is not None:
-                last_observed_target = detection.target_position.copy()
-                perception_updates += 1
+                if self._accept_detection(detection):
+                    last_observed_target = detection.target_position.copy()
+                    self._last_accepted_detection_position = last_observed_target.copy()
+                    perception_updates += 1
+                else:
+                    rejected_detections += 1
+                    if self.config.debug_perception:
+                        print(f"reject detection pos={detection.target_position} bbox={detection.bbox_xyxy} score={detection.score:.3f}")
             hold_command = False
             if last_observed_target is not None:
                 command_target = last_observed_target
@@ -241,6 +250,7 @@ class VisualServoSimulation:
             min_error_m=float(np.min(errors)),
             max_error_m=float(np.max(errors)),
             perception_updates=perception_updates,
+            rejected_detections=rejected_detections,
             hold_steps=hold_steps,
             oracle_truth_steps=oracle_truth_steps,
             truth_fallback_steps=truth_fallback_steps,
@@ -276,6 +286,7 @@ class VisualServoSimulation:
         observation = self._render_camera_observation()
         observation = self._resolve_observation_depth(observation)
         detection = perception.detect(observation, truth_position, self.target, self.config.target)
+        self._debug_detection(detection, observation, truth_position)
         self._last_detection = detection
         if detection.success:
             self._last_detection_wall_time = observation.wall_time_s if observation is not None and observation.wall_time_s else time.perf_counter()
@@ -320,10 +331,43 @@ class VisualServoSimulation:
             return None
         return max(0.0, time.perf_counter() - self._last_detection_wall_time)
 
+    def _accept_detection(self, detection: Detection) -> bool:
+        if detection.target_position is None:
+            return False
+        position = np.asarray(detection.target_position, dtype=float).reshape(3)
+        if not np.isfinite(position).all():
+            return False
+        lower = np.array([0.05, -0.55, 0.05], dtype=float)
+        upper = np.array([0.85, 0.55, 0.85], dtype=float)
+        if np.any(position < lower) or np.any(position > upper):
+            return False
+        if self._last_accepted_detection_position is not None:
+            jump = float(np.linalg.norm(position - self._last_accepted_detection_position))
+            if jump > 0.28:
+                return False
+        return True
+
     def _detect_in_worker(self, observation: CameraObservation, truth_position: np.ndarray, target, prompt: str) -> tuple[CameraObservation, Detection]:
         perception = self._ensure_perception()
         observation = self._resolve_observation_depth(observation)
-        return observation, perception.detect(observation, truth_position, target, prompt)
+        detection = perception.detect(observation, truth_position, target, prompt)
+        self._debug_detection(detection, observation, truth_position)
+        return observation, detection
+
+    def _debug_detection(self, detection: Detection, observation: CameraObservation | None, truth_position: np.ndarray) -> None:
+        if not self.config.debug_perception:
+            return
+        err = None
+        if detection.target_position is not None:
+            err = float(np.linalg.norm(detection.target_position - truth_position))
+        depth_backend = observation.depth_backend if observation is not None else "none"
+        mask_area = None if detection.mask is None else int((detection.mask > 0).sum())
+        print(
+            "perception "
+            f"backend={detection.backend} success={detection.success} score={detection.score:.3f} "
+            f"anchor={detection.anchor_type} pos={detection.target_position} truth_err_m={err} "
+            f"bbox={detection.bbox_xyxy} mask_area={mask_area} depth={depth_backend}"
+        )
 
     def _resolve_observation_depth(self, observation: CameraObservation | None) -> CameraObservation | None:
         if observation is None or observation.depth_backend != "mujoco-hint":

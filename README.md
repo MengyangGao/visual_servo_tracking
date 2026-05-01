@@ -120,6 +120,7 @@ Target offsets are keyboard-controlled.
 - `--camera-fps`: robot-camera processing rate in viewer mode.
 - `--camera-width`, `--camera-height`: robot-camera render size; defaults are `424x320` to keep semantic runs responsive.
 - `--steps`: control steps; defaults to `1000000` with the viewer and `1200` in headless mode.
+- `--debug-perception`: print bbox, mask area, depth backend, 3D target estimate, and simulation-only truth error for diagnosing bad visual servo targets.
 - `--overlay-width-frac`: top-right overlay width as a fraction of viewer width.
 - `--no-camera-overlay`: hide the robot-camera overlay.
 - `--list-targets`: print built-in target names.

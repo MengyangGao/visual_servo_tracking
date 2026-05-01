@@ -114,8 +114,35 @@ def test_semantic_mock_detection_drives_without_truth_fallback(monkeypatch) -> N
     summary = app.run()
     assert summary.detector == "semantic"
     assert summary.perception_updates == 12
+    assert summary.rejected_detections == 0
     assert summary.truth_fallback_steps == 0
     assert summary.oracle_truth_steps == 0
+
+
+def test_implausible_detection_is_rejected(monkeypatch) -> None:
+    class FakeSemantic:
+        name = "semantic"
+
+        def detect(self, observation, truth_position, target, prompt):
+            return Detection(True, "semantic-test", np.array([0.2, 1.2, 0.3], dtype=float), score=0.9)
+
+    monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="static",
+        detector="semantic",
+        steps=4,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        controller=ControllerConfig(task="contact", control_hz=120.0),
+    )
+    app = VisualServoSimulation(cfg)
+    monkeypatch.setattr(app, "_render_camera_observation", lambda: None)
+    summary = app.run()
+    assert summary.perception_updates == 0
+    assert summary.rejected_detections == 4
+    assert summary.hold_steps == 4
 
 
 def test_alternate_robot_headless_smoke() -> None:

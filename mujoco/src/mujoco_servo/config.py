@@ -148,6 +148,7 @@ class DemoConfig:
     manual_control: bool = True
     key_speed_mps: float = 0.18
     camera_overlay: bool = True
+    debug_perception: bool = False
     camera_fps: float = 6.0
     overlay_width_fraction: float = 0.42
     seed: int = 7
