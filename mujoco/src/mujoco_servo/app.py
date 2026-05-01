@@ -9,16 +9,17 @@ import cv2
 import mujoco
 import numpy as np
 
-from .config import DemoConfig
+from .config import DemoConfig, resolve_robot
 from .control import ResolvedRateController, ServoState
 from .perception import CameraIntrinsics, CameraObservation, Detection, PerceptionBackend, build_perception
 from .scene import build_scene, frame_position, set_target_position, site_position
-from .targets import TargetMotion, resolve_target
+from .targets import TargetMotion, load_target_specs, resolve_target
 
 
 @dataclass(slots=True)
 class RunSummary:
     steps: int
+    robot: str
     task: str
     target: str
     trajectory: str
@@ -28,6 +29,12 @@ class RunSummary:
     mean_error_m: float
     min_error_m: float
     max_error_m: float
+    perception_updates: int
+    hold_steps: int
+    oracle_truth_steps: int
+    truth_fallback_steps: int
+    final_perception_age_s: float | None
+    mean_camera_render_ms: float
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -36,8 +43,10 @@ class RunSummary:
 class VisualServoSimulation:
     def __init__(self, config: DemoConfig) -> None:
         self.config = config
-        self.target = resolve_target(config.target)
-        self.scene = build_scene(self.target, config.camera)
+        self.robot = resolve_robot(config.robot)
+        self.extra_targets = load_target_specs(config.target_file)
+        self.target = resolve_target(config.target, self.extra_targets)
+        self.scene = build_scene(self.target, config.camera, self.robot)
         self.motion = TargetMotion(self.target, config.trajectory, config.seed)
         self.detector_name = config.detector.strip().lower()
         self.perception: PerceptionBackend | None = None
@@ -48,6 +57,7 @@ class VisualServoSimulation:
             self.scene.ee_frame_name,
             self.scene.ee_frame_type,
             self.scene.ee_frame_offset,
+            self.scene.robot,
             config.controller,
         )
         self.controller.reset(self.scene.data)
@@ -65,7 +75,10 @@ class VisualServoSimulation:
         self._perception_executor: ThreadPoolExecutor | None = None
         self._perception_future: Future[tuple[CameraObservation, Detection]] | None = None
         self._last_detection: Detection | None = None
+        self._last_detection_wall_time: float | None = None
         self._perception_disabled = False
+        self._control_dt_s = self._substeps * float(self.scene.model.opt.timestep)
+        self._camera_render_times_ms: list[float] = []
 
     def run(self) -> RunSummary:
         viewer = None
@@ -102,6 +115,7 @@ class VisualServoSimulation:
     def _render_camera_observation(self) -> CameraObservation | None:
         if self.detector_name == "oracle":
             return None
+        render_start = time.perf_counter()
         if self._renderer is None:
             self._renderer = mujoco.Renderer(self.scene.model, width=self.config.camera.width, height=self.config.camera.height)
         self._renderer.update_scene(self.scene.data, camera=self.scene.camera_name)
@@ -121,18 +135,25 @@ class VisualServoSimulation:
             width=self.config.camera.width,
             height=self.config.camera.height,
         )
-        return CameraObservation(
+        observation = CameraObservation(
             frame_bgr=rgb[:, :, ::-1].copy(),
             depth_m=depth,
             intrinsics=intrinsics,
             camera_position=np.array(self.scene.data.cam_xpos[cam_id], dtype=float),
             camera_xmat=np.array(self.scene.data.cam_xmat[cam_id], dtype=float).reshape(3, 3),
+            wall_time_s=render_start,
         )
+        self._camera_render_times_ms.append((time.perf_counter() - render_start) * 1000.0)
+        return observation
 
     def _run_loop(self, viewer) -> RunSummary:
         model = self.scene.model
         data = self.scene.data
         errors: list[float] = []
+        hold_steps = 0
+        oracle_truth_steps = 0
+        truth_fallback_steps = 0
+        perception_updates = 0
         last_state: ServoState | None = None
         last_observed_target: np.ndarray | None = None
         wall_start = time.perf_counter()
@@ -145,17 +166,18 @@ class VisualServoSimulation:
             mujoco.mj_forward(model, data)
 
             detection = self._update_perception(viewer, target_pos)
-            if detection is not None and detection.success and detection.target_position is not None:
+            if self.detector_name != "oracle" and detection is not None and detection.success and detection.target_position is not None:
                 last_observed_target = detection.target_position.copy()
+                perception_updates += 1
             if last_observed_target is not None:
                 command_target = last_observed_target
             elif self.detector_name == "oracle":
                 command_target = target_pos
-            elif self._uses_async_perception(viewer):
-                command_target = target_pos
+                oracle_truth_steps += 1
             else:
                 command_target = frame_position(model, data, self.scene.ee_frame_type, self.scene.ee_frame_name, self.scene.ee_frame_offset)
-            last_state = self.controller.step(data, command_target, time_s, step)
+                hold_steps += 1
+            last_state = self.controller.step(data, command_target, time_s, step, self._control_dt_s)
             errors.append(last_state.position_error_m)
 
             for _ in range(self._substeps):
@@ -184,6 +206,7 @@ class VisualServoSimulation:
             final_error = last_state.position_error_m
         return RunSummary(
             steps=len(errors),
+            robot=self.robot.name,
             task=self.config.controller.task,
             target=self.target.name,
             trajectory=self.config.trajectory,
@@ -193,6 +216,12 @@ class VisualServoSimulation:
             mean_error_m=float(np.mean(errors)),
             min_error_m=float(np.min(errors)),
             max_error_m=float(np.max(errors)),
+            perception_updates=perception_updates,
+            hold_steps=hold_steps,
+            oracle_truth_steps=oracle_truth_steps,
+            truth_fallback_steps=truth_fallback_steps,
+            final_perception_age_s=self._perception_age_s(),
+            mean_camera_render_ms=float(np.mean(self._camera_render_times_ms)) if self._camera_render_times_ms else 0.0,
         )
 
     def _uses_async_perception(self, viewer) -> bool:
@@ -215,6 +244,8 @@ class VisualServoSimulation:
         observation = self._render_camera_observation()
         detection = perception.detect(observation, truth_position, self.target, self.config.target)
         self._last_detection = detection
+        if detection.success:
+            self._last_detection_wall_time = observation.wall_time_s or time.perf_counter()
         self._latest_overlay_bgr = self._draw_camera_overlay(observation, detection, False)
         self._latest_overlay_rgb = None
         return detection
@@ -224,6 +255,8 @@ class VisualServoSimulation:
             try:
                 observation, detection = self._perception_future.result()
                 self._last_detection = detection
+                if detection.success:
+                    self._last_detection_wall_time = observation.wall_time_s or time.perf_counter()
                 self._latest_overlay_bgr = self._draw_camera_overlay(observation, detection, False)
                 self._latest_overlay_rgb = None
             except Exception as exc:
@@ -248,6 +281,11 @@ class VisualServoSimulation:
                 truth = truth_position.copy()
                 self._perception_future = self._perception_executor.submit(self._detect_in_worker, observation, truth, target, prompt)
         return self._last_detection
+
+    def _perception_age_s(self) -> float | None:
+        if self._last_detection_wall_time is None:
+            return None
+        return max(0.0, time.perf_counter() - self._last_detection_wall_time)
 
     def _detect_in_worker(self, observation: CameraObservation, truth_position: np.ndarray, target, prompt: str) -> tuple[CameraObservation, Detection]:
         perception = self._ensure_perception()
@@ -341,6 +379,8 @@ class VisualServoSimulation:
         label = f"{self.detector_name} pending" if pending else f"{self.detector_name}"
         if detection is not None:
             label = f"{detection.backend} score={detection.score:.2f}"
+            if detection.anchor_type != "unknown":
+                label = f"{label} {detection.anchor_type}"
         cv2.putText(image, label, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(image, self.config.target, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
         return image

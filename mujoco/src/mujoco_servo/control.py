@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import mujoco
 import numpy as np
 
-from .config import ControllerConfig, menagerie_home_qpos
+from .config import ControllerConfig, RobotSpec
 from .math_utils import clamp_norm, damped_pseudo_inverse, normalize, rotation_error_vector, tool_z_facing_rotation
 from .scene import frame_position
 
@@ -62,23 +62,29 @@ class ResolvedRateController:
         ee_frame_name: str,
         ee_frame_type: str,
         ee_frame_offset: tuple[float, float, float] | np.ndarray,
+        robot: RobotSpec,
         config: ControllerConfig,
     ) -> None:
         self.model = model
+        self.robot = robot
         self.ee_frame_name = ee_frame_name
         self.ee_frame_type = ee_frame_type
         self.ee_frame_offset = np.asarray(ee_frame_offset, dtype=float).reshape(3)
         self.config = config
         self._filtered_target: np.ndarray | None = None
-        self._joint_ids = [
-            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"joint{i}")
-            for i in range(1, 8)
-        ]
+        self._joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in robot.joint_names]
         if any(joint_id < 0 for joint_id in self._joint_ids):
-            raise RuntimeError("expected joints joint1..joint7")
+            missing = [name for name, joint_id in zip(robot.joint_names, self._joint_ids) if joint_id < 0]
+            raise RuntimeError(f"robot '{robot.name}' missing joints: {', '.join(missing)}")
+        self._actuator_ids = [self._actuator_id_for_joint(name, i) for i, name in enumerate(robot.joint_names)]
+        self._passive_actuator_ids = tuple(
+            (self._resolve_actuator(name), float(value)) for name, value in robot.passive_actuator_ctrl
+        )
         self._qpos_adr = np.array([model.jnt_qposadr[joint_id] for joint_id in self._joint_ids], dtype=int)
         self._dof_adr = np.array([model.jnt_dofadr[joint_id] for joint_id in self._joint_ids], dtype=int)
-        self._qpos_home = menagerie_home_qpos()
+        self._qpos_home = np.array(robot.home_qpos, dtype=float)
+        if self._qpos_home.shape != (len(self._joint_ids),):
+            raise RuntimeError(f"robot '{robot.name}' home_qpos must have {len(self._joint_ids)} values")
         self._qpos_command = self._qpos_home.copy()
         self._frame_id = self._resolve_frame_id(model, ee_frame_type, ee_frame_name)
 
@@ -98,7 +104,7 @@ class ResolvedRateController:
         self._qpos_command = np.array(data.qpos[self._qpos_adr], dtype=float)
         self._filtered_target = None
 
-    def step(self, data: mujoco.MjData, target_position: np.ndarray, time_s: float, step_index: int) -> ServoState:
+    def step(self, data: mujoco.MjData, target_position: np.ndarray, time_s: float, step_index: int, dt: float | None = None) -> ServoState:
         target = np.asarray(target_position, dtype=float).reshape(3)
         if self._filtered_target is None:
             self._filtered_target = target.copy()
@@ -127,7 +133,7 @@ class ResolvedRateController:
             angular_velocity = clamp_norm(self.config.orientation_gain * orientation_error, self.config.max_angular_speed)
             task_jac = jacp[:, self._dof_adr]
             qvel = damped_pseudo_inverse(task_jac, self.config.damping) @ ee_velocity
-            nullspace = np.eye(7) - damped_pseudo_inverse(task_jac, self.config.damping) @ task_jac
+            nullspace = np.eye(len(self._joint_ids)) - damped_pseudo_inverse(task_jac, self.config.damping) @ task_jac
             orientation_jac = jacr[:, self._dof_adr]
             correction_jac = orientation_jac @ nullspace
             correction = damped_pseudo_inverse(correction_jac, self.config.damping) @ (angular_velocity - orientation_jac @ qvel)
@@ -138,21 +144,23 @@ class ResolvedRateController:
             qvel = damped_pseudo_inverse(task_jac, self.config.damping) @ task_velocity
 
         home_error = self._qpos_home - np.asarray(data.qpos[self._qpos_adr], dtype=float)
-        nullspace = np.eye(7) - damped_pseudo_inverse(task_jac, self.config.damping) @ task_jac
+        nullspace = np.eye(len(self._joint_ids)) - damped_pseudo_inverse(task_jac, self.config.damping) @ task_jac
         home_gain = 0.03 if desired_rotation is not None else 0.18
         qvel = qvel + home_gain * (nullspace @ home_error)
         qvel = clamp_norm(qvel, self.config.max_joint_speed)
 
-        dt = 1.0 / float(self.config.control_hz)
+        dt_s = float(dt) if dt is not None else 1.0 / float(self.config.control_hz)
         current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
-        self._qpos_command = self._qpos_command + qvel * dt
+        self._qpos_command = self._qpos_command + qvel * dt_s
         self._qpos_command = np.clip(self._qpos_command, current_qpos - 0.22, current_qpos + 0.22)
         for i, joint_id in enumerate(self._joint_ids):
-            lo, hi = self.model.jnt_range[joint_id]
-            self._qpos_command[i] = np.clip(self._qpos_command[i], lo + 1e-4, hi - 1e-4)
-        data.ctrl[:7] = self._qpos_command
-        if self.model.nu > 7:
-            data.ctrl[7] = 255.0
+            if self.model.jnt_limited[joint_id]:
+                lo, hi = self.model.jnt_range[joint_id]
+                self._qpos_command[i] = np.clip(self._qpos_command[i], lo + 1e-4, hi - 1e-4)
+        for i, actuator_id in enumerate(self._actuator_ids):
+            data.ctrl[actuator_id] = self._qpos_command[i]
+        for actuator_id, value in self._passive_actuator_ids:
+            data.ctrl[actuator_id] = value
 
         return ServoState(
             step=step_index,
@@ -170,3 +178,20 @@ class ResolvedRateController:
         if self.ee_frame_type == "site":
             return np.array(data.site_xmat[self._frame_id], dtype=float).reshape(3, 3)
         return np.array(data.xmat[self._frame_id], dtype=float).reshape(3, 3)
+
+    def _resolve_actuator(self, actuator_name: str) -> int:
+        actuator_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
+        if actuator_id < 0:
+            raise RuntimeError(f"robot '{self.robot.name}' actuator '{actuator_name}' not found")
+        return int(actuator_id)
+
+    def _actuator_id_for_joint(self, joint_name: str, index: int) -> int:
+        if index < len(self.robot.actuator_names):
+            actuator_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, self.robot.actuator_names[index])
+            if actuator_id >= 0:
+                return int(actuator_id)
+        joint_id = self._joint_ids[index]
+        for actuator_id in range(self.model.nu):
+            if int(self.model.actuator_trnid[actuator_id, 0]) == joint_id:
+                return actuator_id
+        raise RuntimeError(f"robot '{self.robot.name}' actuator for joint '{joint_name}' not found")

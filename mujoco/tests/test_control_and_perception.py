@@ -6,8 +6,9 @@ import numpy as np
 from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.config import ControllerConfig
-from mujoco_servo.control import desired_ee_position
+from mujoco_servo.control import ResolvedRateController, desired_ee_position
 from mujoco_servo.perception import CameraIntrinsics, CameraObservation, ColorSegmentationPerception, OraclePerception, SemanticPerception
+from mujoco_servo.scene import build_scene
 from mujoco_servo.targets import resolve_target
 
 
@@ -52,6 +53,9 @@ def test_color_segmentation_detects_render_like_blob() -> None:
     assert detection.success
     assert detection.bbox_xyxy is not None
     assert detection.centroid_px is not None
+    assert detection.anchor_type == "visible_bbox_center"
+    assert detection.world_bbox_min is not None
+    assert detection.world_bbox_max is not None
     assert 105 < detection.centroid_px[0] < 120
     assert 80 < detection.centroid_px[1] < 100
 
@@ -77,5 +81,20 @@ def test_semantic_detect_reuses_initialized_local_tracker_without_models() -> No
     detection = semantic.detect(observation, np.zeros(3, dtype=float), target, "apple")
     assert detection.success
     assert detection.backend == "semantic-track"
+    assert semantic._track_failures == 0
     assert detection.bbox_xyxy is not None
     assert detection.mask is not None
+
+
+def test_controller_uses_robot_spec_dimensions_for_lite6() -> None:
+    scene = build_scene(resolve_target("cup"), robot="lite6")
+    controller = ResolvedRateController(
+        scene.model,
+        scene.ee_frame_name,
+        scene.ee_frame_type,
+        scene.ee_frame_offset,
+        scene.robot,
+        ControllerConfig(),
+    )
+    assert len(controller._joint_ids) == 6
+    assert len(controller._actuator_ids) == 6

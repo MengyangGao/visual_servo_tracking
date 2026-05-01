@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -68,9 +71,66 @@ BASE_POSITIONS: dict[str, np.ndarray] = {
 }
 
 
-def resolve_target(name_or_prompt: str) -> TargetSpec:
+def load_target_specs(path: str | Path | None) -> dict[str, TargetSpec]:
+    if path is None:
+        return {}
+    source = Path(path)
+    payload = json.loads(source.read_text())
+    entries = payload.get("targets", payload if isinstance(payload, list) else None)
+    if not isinstance(entries, list):
+        raise ValueError("target file must contain a list or a {'targets': [...]} object")
+    specs: dict[str, TargetSpec] = {}
+    for entry in entries:
+        spec = _target_from_mapping(entry)
+        specs[spec.name] = spec
+    return specs
+
+
+def _target_from_mapping(entry: Any) -> TargetSpec:
+    if not isinstance(entry, dict):
+        raise ValueError("target entries must be objects")
+    name = _required_text(entry, "name")
+    shape = str(entry.get("shape", "box")).strip().lower()
+    size = _float_tuple(entry.get("size", (0.10, 0.10, 0.10)), 3, "size")
+    rgba = _float_tuple(entry.get("rgba", (0.85, 0.25, 0.25, 1.0)), 4, "rgba")
+    aliases = tuple(str(value).strip().lower() for value in entry.get("aliases", ()) if str(value).strip())
+    base = entry.get("base_position")
+    base_position = None if base is None else _float_tuple(base, 3, "base_position")
+    parts = tuple(_target_part_from_mapping(part) for part in entry.get("parts", ()))
+    return TargetSpec(name=name, shape=shape, size=size, rgba=rgba, aliases=aliases, parts=parts, base_position=base_position)
+
+
+def _target_part_from_mapping(entry: Any) -> TargetPart:
+    if not isinstance(entry, dict):
+        raise ValueError("target parts must be objects")
+    rgba = entry.get("rgba")
+    quat = entry.get("quat")
+    return TargetPart(
+        shape=str(entry.get("shape", "box")).strip().lower(),
+        size=_float_tuple(entry.get("size", (0.05, 0.05, 0.05)), 3, "part.size"),
+        pos=_float_tuple(entry.get("pos", (0.0, 0.0, 0.0)), 3, "part.pos"),
+        rgba=None if rgba is None else _float_tuple(rgba, 4, "part.rgba"),
+        quat=None if quat is None else _float_tuple(quat, 4, "part.quat"),
+    )
+
+
+def _required_text(entry: dict[str, Any], key: str) -> str:
+    value = str(entry.get(key, "")).strip().lower()
+    if not value:
+        raise ValueError(f"target entry missing '{key}'")
+    return value
+
+
+def _float_tuple(value: Any, expected: int, field: str) -> tuple[float, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) != expected:
+        raise ValueError(f"{field} must contain {expected} numbers")
+    return tuple(float(item) for item in value)
+
+
+def resolve_target(name_or_prompt: str, extra_targets: dict[str, TargetSpec] | None = None) -> TargetSpec:
     text = " ".join(name_or_prompt.lower().strip().split())
-    for key, spec in TARGETS.items():
+    targets = {**TARGETS, **(extra_targets or {})}
+    for key, spec in targets.items():
         if key in text or any(alias in text for alias in spec.aliases):
             return spec
     safe_name = "_".join(part for part in text.split() if part.isalnum()) or "object"
@@ -78,6 +138,8 @@ def resolve_target(name_or_prompt: str) -> TargetSpec:
 
 
 def base_position(target: TargetSpec) -> np.ndarray:
+    if target.base_position is not None:
+        return np.array(target.base_position, dtype=float)
     return BASE_POSITIONS.get(target.name, np.array([0.48, 0.02, 0.35], dtype=float)).copy()
 
 

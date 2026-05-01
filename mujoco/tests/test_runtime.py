@@ -29,6 +29,9 @@ def test_headless_demo_reduces_contact_error() -> None:
     start_error = float(((start_target - start_ee) ** 2).sum() ** 0.5)
     summary = app.run()
     assert summary.steps == 240
+    assert summary.robot == "panda"
+    assert summary.oracle_truth_steps == 240
+    assert summary.truth_fallback_steps == 0
     assert summary.final_error_m < start_error
     assert summary.final_error_m < 0.22
 
@@ -64,6 +67,43 @@ def test_front_standoff_tracks_requested_distance() -> None:
     assert summary.steps == 240
     assert summary.final_error_m < 0.02
     assert abs(summary.final_target_distance_m - 0.12) < 0.02
+
+
+def test_non_oracle_without_detection_holds_end_effector(monkeypatch) -> None:
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="static",
+        detector="color",
+        steps=8,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        controller=ControllerConfig(task="contact", control_hz=120.0),
+    )
+    app = VisualServoSimulation(cfg)
+    monkeypatch.setattr(app, "_update_perception", lambda viewer, truth_position: None)
+    summary = app.run()
+    assert summary.hold_steps == 8
+    assert summary.truth_fallback_steps == 0
+    assert summary.oracle_truth_steps == 0
+    assert summary.perception_updates == 0
+
+
+def test_alternate_robot_headless_smoke() -> None:
+    cfg = DemoConfig(
+        robot="ur5e",
+        target="box",
+        trajectory="static",
+        detector="oracle",
+        steps=20,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        controller=ControllerConfig(task="contact", control_hz=120.0),
+    )
+    summary = VisualServoSimulation(cfg).run()
+    assert summary.robot == "ur5e"
+    assert summary.steps == 20
 
 
 def test_semantic_viewer_mode_lazily_loads_backend() -> None:

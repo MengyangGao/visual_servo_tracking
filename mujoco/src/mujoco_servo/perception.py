@@ -27,6 +27,7 @@ class CameraObservation:
     intrinsics: CameraIntrinsics
     camera_position: np.ndarray
     camera_xmat: np.ndarray
+    wall_time_s: float = 0.0
 
 
 @dataclass(slots=True)
@@ -38,6 +39,9 @@ class Detection:
     bbox_xyxy: np.ndarray | None = None
     centroid_px: np.ndarray | None = None
     mask: np.ndarray | None = None
+    anchor_type: str = "unknown"
+    world_bbox_min: np.ndarray | None = None
+    world_bbox_max: np.ndarray | None = None
 
 
 class PerceptionBackend(Protocol):
@@ -59,7 +63,11 @@ def _bbox_mask(frame_shape: tuple[int, int, int], bbox_xyxy: np.ndarray) -> np.n
     return mask
 
 
-def _estimate_world_position(observation: CameraObservation, bbox_xyxy: np.ndarray, mask: np.ndarray | None) -> tuple[np.ndarray | None, np.ndarray]:
+def _estimate_world_position(
+    observation: CameraObservation,
+    bbox_xyxy: np.ndarray,
+    mask: np.ndarray | None,
+) -> tuple[np.ndarray | None, np.ndarray, np.ndarray | None, np.ndarray | None, str]:
     if mask is None:
         mask = _bbox_mask(observation.frame_bgr.shape, bbox_xyxy)
     valid = mask > 0
@@ -72,24 +80,61 @@ def _estimate_world_position(observation: CameraObservation, bbox_xyxy: np.ndarr
         v = 0.5 * (y1 + y2)
         sample = depth[max(0, min(depth.shape[0] - 1, int(v))), max(0, min(depth.shape[1] - 1, int(u)))]
         if not np.isfinite(sample) or sample <= 0.0:
-            return None, mask
+            return None, mask, None, None, "none"
         z = float(sample)
+        point = _pixel_depth_to_world(observation, u, v, z)
+        return point, mask, point.copy(), point.copy(), "bbox_center_depth"
     else:
         ys, xs = np.nonzero(valid)
         u = float(np.mean(xs))
         v = float(np.mean(ys))
         z = float(np.median(depth[valid]))
+        if xs.size > 4096:
+            stride = max(1, xs.size // 4096)
+            xs_sample = xs[::stride]
+            ys_sample = ys[::stride]
+        else:
+            xs_sample = xs
+            ys_sample = ys
+        world_points = _pixels_depth_to_world(observation, xs_sample, ys_sample, depth[ys_sample, xs_sample])
+        bbox_min = np.min(world_points, axis=0)
+        bbox_max = np.max(world_points, axis=0)
+        visible_center = 0.5 * (bbox_min + bbox_max)
+        surface_centroid = _pixel_depth_to_world(observation, u, v, z)
+        anchor = 0.65 * visible_center + 0.35 * surface_centroid
+        return anchor, mask, bbox_min, bbox_max, "visible_bbox_center"
+
+
+def _pixel_depth_to_world(observation: CameraObservation, u: float, v: float, z: float) -> np.ndarray:
     intr = observation.intrinsics
     # MuJoCo/OpenGL camera coordinates: +x right, +y up, camera looks along -z.
     point_cam = np.array([(u - intr.cx) * z / intr.fx, -(v - intr.cy) * z / intr.fy, -z], dtype=float)
-    return observation.camera_position + observation.camera_xmat @ point_cam, mask
+    return observation.camera_position + observation.camera_xmat @ point_cam
+
+
+def _pixels_depth_to_world(observation: CameraObservation, us: np.ndarray, vs: np.ndarray, zs: np.ndarray) -> np.ndarray:
+    intr = observation.intrinsics
+    us = np.asarray(us, dtype=float)
+    vs = np.asarray(vs, dtype=float)
+    zs = np.asarray(zs, dtype=float)
+    points_cam = np.column_stack(
+        [
+            (us - intr.cx) * zs / intr.fx,
+            -(vs - intr.cy) * zs / intr.fy,
+            -zs,
+        ]
+    )
+    camera_position = np.asarray(observation.camera_position, dtype=float).reshape(3)
+    camera_xmat = np.asarray(observation.camera_xmat, dtype=float).reshape(3, 3)
+    return camera_position + np.einsum("ij,nj->ni", camera_xmat, points_cam)
 
 
 class OraclePerception:
     name = "oracle"
 
     def detect(self, observation: CameraObservation | None, truth_position: np.ndarray, target: TargetSpec, prompt: str) -> Detection:
-        return Detection(success=True, backend=self.name, target_position=np.asarray(truth_position, dtype=float).reshape(3).copy(), score=1.0)
+        position = np.asarray(truth_position, dtype=float).reshape(3).copy()
+        return Detection(success=True, backend=self.name, target_position=position, score=1.0, anchor_type="truth_center")
 
 
 class ColorSegmentationPerception:
@@ -122,7 +167,7 @@ class ColorSegmentationPerception:
         moments = cv2.moments(contour)
         cx = x + 0.5 * w if abs(moments["m00"]) < 1e-9 else moments["m10"] / moments["m00"]
         cy = y + 0.5 * h if abs(moments["m00"]) < 1e-9 else moments["m01"] / moments["m00"]
-        position, mask = _estimate_world_position(observation, bbox, mask)
+        position, mask, bbox_min, bbox_max, anchor_type = _estimate_world_position(observation, bbox, mask)
         return Detection(
             success=position is not None,
             backend=self.name,
@@ -131,6 +176,9 @@ class ColorSegmentationPerception:
             bbox_xyxy=bbox,
             centroid_px=np.array([cx, cy], dtype=float),
             mask=mask,
+            anchor_type=anchor_type,
+            world_bbox_min=bbox_min,
+            world_bbox_max=bbox_max,
         )
 
 
@@ -166,15 +214,27 @@ class SemanticPerception:
         self._last_mask: np.ndarray | None = None
         self._last_detection: Detection | None = None
         self._hsv_center: np.ndarray | None = None
+        self._frames_since_redetect = 0
+        self._track_failures = 0
+        self._redetect_interval = int(os.getenv("MUJOCO_SERVO_REDETECT_INTERVAL", "45"))
+        self._max_track_failures = int(os.getenv("MUJOCO_SERVO_MAX_TRACK_FAILURES", "3"))
 
     def detect(self, observation: CameraObservation | None, truth_position: np.ndarray, target: TargetSpec, prompt: str) -> Detection:
         if observation is None:
             return Detection(False, self.name, None)
         if self._initialized:
-            tracked = self._track_from_last_mask(observation)
-            if tracked.success:
-                self._last_detection = tracked
-                return tracked
+            self._frames_since_redetect = getattr(self, "_frames_since_redetect", 0) + 1
+            redetect_interval = max(1, int(getattr(self, "_redetect_interval", 45)))
+            should_redetect = self._frames_since_redetect >= redetect_interval
+            if not should_redetect:
+                tracked = self._track_from_last_mask(observation)
+                if tracked.success:
+                    self._track_failures = 0
+                    self._last_detection = tracked
+                    return tracked
+                self._track_failures = getattr(self, "_track_failures", 0) + 1
+                if self._track_failures < int(getattr(self, "_max_track_failures", 3)):
+                    return tracked
         image = self._image_cls.fromarray(observation.frame_bgr[:, :, ::-1])
         text = prompt.strip().lower()
         if not text.endswith("."):
@@ -192,12 +252,15 @@ class SemanticPerception:
         boxes = results.get("boxes", [])
         scores = results.get("scores", [])
         if len(boxes) == 0:
+            self._track_failures = getattr(self, "_track_failures", 0) + 1
+            if self._track_failures >= int(getattr(self, "_max_track_failures", 3)):
+                self._initialized = False
             return Detection(False, self.name, None)
         best = int(self._torch.argmax(scores).item())
         bbox = boxes[best].detach().cpu().numpy().astype(float)
         score = float(scores[best].detach().cpu().item())
         mask = self._sam_mask(image, bbox)
-        position, mask = _estimate_world_position(observation, bbox, mask)
+        position, mask, bbox_min, bbox_max, anchor_type = _estimate_world_position(observation, bbox, mask)
         x1, y1, x2, y2 = bbox
         detection = Detection(
             success=position is not None,
@@ -207,9 +270,14 @@ class SemanticPerception:
             bbox_xyxy=bbox,
             centroid_px=np.array([0.5 * (x1 + x2), 0.5 * (y1 + y2)], dtype=float),
             mask=mask,
+            anchor_type=anchor_type,
+            world_bbox_min=bbox_min,
+            world_bbox_max=bbox_max,
         )
         if detection.success:
             self._initialized = True
+            self._frames_since_redetect = 0
+            self._track_failures = 0
             self._last_bbox = bbox.copy()
             self._last_mask = mask.copy()
             self._last_detection = detection
@@ -244,7 +312,7 @@ class SemanticPerception:
             return Detection(False, self.name, None, mask=mask)
         x, y, w, h = cv2.boundingRect(contour)
         bbox = np.array([x, y, x + w, y + h], dtype=float)
-        position, mask = _estimate_world_position(observation, bbox, mask)
+        position, mask, bbox_min, bbox_max, anchor_type = _estimate_world_position(observation, bbox, mask)
         moments = cv2.moments(contour)
         cx = x + 0.5 * w if abs(moments["m00"]) < 1e-9 else moments["m10"] / moments["m00"]
         cy = y + 0.5 * h if abs(moments["m00"]) < 1e-9 else moments["m01"] / moments["m00"]
@@ -256,6 +324,9 @@ class SemanticPerception:
             bbox_xyxy=bbox,
             centroid_px=np.array([cx, cy], dtype=float),
             mask=mask,
+            anchor_type=anchor_type,
+            world_bbox_min=bbox_min,
+            world_bbox_max=bbox_max,
         )
         if detection.success:
             self._last_bbox = bbox.copy()

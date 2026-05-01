@@ -9,8 +9,8 @@ This repository contains visual-servo tracking demos for robotic manipulators.
 
 The MuJoCo project is the current active simulator. It builds a scene with:
 
-- a Menagerie Franka Emika Panda robot arm,
-- a modular target object selected by word, such as `apple`, `cup`, `box`, `sphere`, or `capsule`,
+- a selectable Menagerie robot arm, defaulting to Franka Emika Panda,
+- a modular target object selected by word, such as `apple`, `cup`, `box`, `sphere`, or `capsule`, with optional JSON target files,
 - a fixed robot perception camera named `servo_camera`,
 - a passive MuJoCo viewer with a top-right robot-camera overlay showing image detections, masks, boxes, and tracker state,
 - task modes including direct contact and front standoff tracking at a requested distance.
@@ -49,6 +49,7 @@ On macOS, use `mjpython` for the native MuJoCo viewer:
 
 ```bash
 conda run -n visual_servo mjpython mujoco/scripts/demo.py \
+  --robot panda \
   --target apple \
   --trajectory static \
   --task front-standoff \
@@ -61,6 +62,7 @@ For a lighter detector:
 
 ```bash
 conda run -n visual_servo mjpython mujoco/scripts/demo.py \
+  --robot panda \
   --target cup \
   --trajectory circle \
   --task contact \
@@ -98,6 +100,8 @@ Target offsets are keyboard-controlled.
 ### Useful Options
 
 - `--target`: target word or phrase.
+- `--target-file`: JSON file with additional primitive or compound target specs.
+- `--robot`: `panda`, `ur5e`, or `lite6`.
 - `--trajectory`: `static`, `circle`, `figure-eight`, `random-walk`, or `waypoints`.
 - `--task`: `contact`, `standoff`, `front-standoff`, `align-x`, `align-y`, or `align-z`.
 - `--standoff-cm`: distance for standoff modes.
@@ -111,6 +115,23 @@ Target offsets are keyboard-controlled.
 
 ```bash
 conda run -n visual_servo pytest mujoco/tests
+```
+
+Minimal custom target file:
+
+```json
+{
+  "targets": [
+    {
+      "name": "banana",
+      "shape": "capsule",
+      "size": [0.04, 0.04, 0.16],
+      "rgba": [0.95, 0.78, 0.12, 1.0],
+      "aliases": ["yellow banana"],
+      "base_position": [0.42, -0.05, 0.36]
+    }
+  ]
+}
 ```
 
 ## MATLAB

@@ -6,7 +6,7 @@ from textwrap import dedent
 import mujoco
 import numpy as np
 
-from .config import CameraConfig, MENAGERIE_PANDA_ASSETS, MENAGERIE_PANDA_XML, TargetPart, menagerie_home_qpos
+from .config import CameraConfig, RobotSpec, TargetPart, resolve_robot
 from .math_utils import look_at_xyaxes
 from .targets import TargetSpec, base_position
 
@@ -16,6 +16,7 @@ class Scene:
     model: mujoco.MjModel
     data: mujoco.MjData
     target: TargetSpec
+    robot: RobotSpec
     source: str
     ee_frame_name: str
     ee_frame_type: str
@@ -107,47 +108,68 @@ def _tracking_worldbody_xml(target: TargetSpec, camera: CameraConfig) -> str:
     ).strip()
 
 
-def build_menagerie_mjcf(target: TargetSpec, camera: CameraConfig) -> str:
-    text = MENAGERIE_PANDA_XML.read_text()
-    text = text.replace('meshdir="assets"', f'meshdir="{MENAGERIE_PANDA_ASSETS}"')
+def build_menagerie_mjcf(target: TargetSpec, camera: CameraConfig, robot: RobotSpec) -> str:
+    text = robot.xml_path.read_text()
+    text = text.replace('meshdir="assets"', f'meshdir="{robot.asset_dir}"')
     insertion = "\n" + _tracking_worldbody_xml(target, camera) + "\n"
     return text.replace("</mujoco>", f"{insertion}</mujoco>", 1)
 
 
-def build_scene(target: TargetSpec, camera: CameraConfig | None = None) -> Scene:
+def build_scene(target: TargetSpec, camera: CameraConfig | None = None, robot: RobotSpec | str = "panda") -> Scene:
     cam = camera or CameraConfig()
-    if not MENAGERIE_PANDA_XML.exists() or not MENAGERIE_PANDA_ASSETS.exists():
+    robot_spec = resolve_robot(robot) if isinstance(robot, str) else robot
+    if not robot_spec.xml_path.exists() or not robot_spec.asset_dir.exists():
         raise FileNotFoundError(
-            "MuJoCo Menagerie Panda assets are required. Run "
+            f"MuJoCo Menagerie assets for robot '{robot_spec.name}' are required. Run "
             "`git submodule update --init --recursive mujoco/vendor/mujoco_menagerie`."
         )
     source = "menagerie"
-    model = mujoco.MjModel.from_xml_string(build_menagerie_mjcf(target, cam))
-    home = menagerie_home_qpos()
-    ee_frame_name = "hand"
-    ee_frame_type = "body_point"
-    ee_frame_offset = (0.0, 0.0, 0.10)
+    model = mujoco.MjModel.from_xml_string(build_menagerie_mjcf(target, cam, robot_spec))
+    home = np.array(robot_spec.home_qpos, dtype=float)
     data = mujoco.MjData(model)
     mujoco.mj_resetDataKeyframe(model, data, 0)
-    joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"joint{i}") for i in range(1, 8)]
+    joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in robot_spec.joint_names]
     for i, joint_id in enumerate(joint_ids):
+        if joint_id < 0:
+            raise RuntimeError(f"robot '{robot_spec.name}' joint '{robot_spec.joint_names[i]}' not found")
         data.qpos[model.jnt_qposadr[joint_id]] = home[i]
-        if i < model.nu:
-            data.ctrl[i] = home[i]
-    if model.nu > 7:
-        data.ctrl[7] = 255.0
+    _set_robot_actuator_ctrl(model, data, robot_spec, home)
     set_target_position(model, data, base_position(target))
     mujoco.mj_forward(model, data)
     return Scene(
         model=model,
         data=data,
         target=target,
+        robot=robot_spec,
         source=source,
-        ee_frame_name=ee_frame_name,
-        ee_frame_type=ee_frame_type,
-        ee_frame_offset=ee_frame_offset,
+        ee_frame_name=robot_spec.ee_frame_name,
+        ee_frame_type=robot_spec.ee_frame_type,
+        ee_frame_offset=robot_spec.ee_frame_offset,
         camera_name=cam.name,
     )
+
+
+def _set_robot_actuator_ctrl(model: mujoco.MjModel, data: mujoco.MjData, robot: RobotSpec, qpos_command: np.ndarray) -> None:
+    for i, joint_name in enumerate(robot.joint_names):
+        actuator_id = _actuator_id_for_joint(model, robot, joint_name, i)
+        data.ctrl[actuator_id] = qpos_command[i]
+    for actuator_name, value in robot.passive_actuator_ctrl:
+        actuator_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
+        if actuator_id < 0:
+            raise RuntimeError(f"robot '{robot.name}' passive actuator '{actuator_name}' not found")
+        data.ctrl[actuator_id] = float(value)
+
+
+def _actuator_id_for_joint(model: mujoco.MjModel, robot: RobotSpec, joint_name: str, index: int) -> int:
+    if index < len(robot.actuator_names):
+        actuator_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, robot.actuator_names[index])
+        if actuator_id >= 0:
+            return int(actuator_id)
+    joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+    for actuator_id in range(model.nu):
+        if int(model.actuator_trnid[actuator_id, 0]) == joint_id:
+            return actuator_id
+    raise RuntimeError(f"robot '{robot.name}' actuator for joint '{joint_name}' not found")
 
 
 def set_target_position(model: mujoco.MjModel, data: mujoco.MjData, position: np.ndarray) -> None:

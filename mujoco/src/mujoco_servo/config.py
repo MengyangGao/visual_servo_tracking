@@ -7,8 +7,9 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MENAGERIE_PANDA_XML = ROOT / "vendor" / "mujoco_menagerie" / "franka_emika_panda" / "panda.xml"
-MENAGERIE_PANDA_ASSETS = ROOT / "vendor" / "mujoco_menagerie" / "franka_emika_panda" / "assets"
+MENAGERIE_HOME = ROOT / "vendor" / "mujoco_menagerie"
+MENAGERIE_PANDA_XML = MENAGERIE_HOME / "franka_emika_panda" / "panda.xml"
+MENAGERIE_PANDA_ASSETS = MENAGERIE_HOME / "franka_emika_panda" / "assets"
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class TargetSpec:
     rgba: tuple[float, float, float, float]
     aliases: tuple[str, ...] = ()
     parts: tuple["TargetPart", ...] = ()
+    base_position: tuple[float, float, float] | None = None
 
     @property
     def radius(self) -> float:
@@ -60,8 +62,75 @@ class ControllerConfig:
 
 
 @dataclass(frozen=True)
+class RobotSpec:
+    name: str
+    xml_path: Path
+    asset_dir: Path
+    joint_names: tuple[str, ...]
+    actuator_names: tuple[str, ...]
+    home_qpos: tuple[float, ...]
+    ee_frame_name: str
+    ee_frame_type: str
+    ee_frame_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    passive_actuator_ctrl: tuple[tuple[str, float], ...] = ()
+    aliases: tuple[str, ...] = ()
+
+    @property
+    def dof(self) -> int:
+        return len(self.joint_names)
+
+
+ROBOT_SPECS: dict[str, RobotSpec] = {
+    "panda": RobotSpec(
+        name="panda",
+        xml_path=MENAGERIE_PANDA_XML,
+        asset_dir=MENAGERIE_PANDA_ASSETS,
+        joint_names=("joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"),
+        actuator_names=("actuator1", "actuator2", "actuator3", "actuator4", "actuator5", "actuator6", "actuator7"),
+        home_qpos=(0.0, -0.6, 0.0, -2.2, 0.0, 2.4, -0.7853),
+        ee_frame_name="hand",
+        ee_frame_type="body_point",
+        ee_frame_offset=(0.0, 0.0, 0.10),
+        passive_actuator_ctrl=(("actuator8", 255.0),),
+        aliases=("franka", "franka-panda", "franka_emika_panda"),
+    ),
+    "ur5e": RobotSpec(
+        name="ur5e",
+        xml_path=MENAGERIE_HOME / "universal_robots_ur5e" / "ur5e.xml",
+        asset_dir=MENAGERIE_HOME / "universal_robots_ur5e" / "assets",
+        joint_names=(
+            "shoulder_pan_joint",
+            "shoulder_lift_joint",
+            "elbow_joint",
+            "wrist_1_joint",
+            "wrist_2_joint",
+            "wrist_3_joint",
+        ),
+        actuator_names=("shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3"),
+        home_qpos=(-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0),
+        ee_frame_name="attachment_site",
+        ee_frame_type="site",
+        aliases=("universal-robots-ur5e", "universal_robots_ur5e", "ur"),
+    ),
+    "lite6": RobotSpec(
+        name="lite6",
+        xml_path=MENAGERIE_HOME / "ufactory_lite6" / "lite6.xml",
+        asset_dir=MENAGERIE_HOME / "ufactory_lite6" / "assets",
+        joint_names=("joint1", "joint2", "joint3", "joint4", "joint5", "joint6"),
+        actuator_names=("joint1", "joint2", "joint3", "joint4", "joint5", "joint6"),
+        home_qpos=(0.0, 0.0, 1.57, 0.0, 1.57, 0.0),
+        ee_frame_name="attachment_site",
+        ee_frame_type="site",
+        aliases=("ufactory-lite6", "ufactory_lite6", "xarm-lite6"),
+    ),
+}
+
+
+@dataclass(frozen=True)
 class DemoConfig:
+    robot: str = "panda"
     target: str = "cup"
+    target_file: str | None = None
     trajectory: str = "circle"
     detector: str = "oracle"
     steps: int = 1200
@@ -87,7 +156,19 @@ def default_home_qpos() -> np.ndarray:
 
 
 def menagerie_home_qpos() -> np.ndarray:
-    return np.array([0.0, -0.6, 0.0, -2.2, 0.0, 2.4, -0.7853], dtype=float)
+    return np.array(ROBOT_SPECS["panda"].home_qpos, dtype=float)
+
+
+def available_robots() -> tuple[str, ...]:
+    return tuple(sorted(ROBOT_SPECS))
+
+
+def resolve_robot(name: str) -> RobotSpec:
+    normalized = name.strip().lower()
+    for key, spec in ROBOT_SPECS.items():
+        if normalized == key or normalized in spec.aliases:
+            return spec
+    raise ValueError(f"unknown robot '{name}'")
 
 
 def available_tasks() -> tuple[str, ...]:

@@ -4,13 +4,15 @@ import argparse
 import json
 
 from .app import run_demo
-from .config import CameraConfig, ControllerConfig, DemoConfig, available_tasks, available_trajectories
+from .config import CameraConfig, ControllerConfig, DemoConfig, available_robots, available_tasks, available_trajectories
 from .targets import TARGETS
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MuJoCo visual-servo tracking demo")
+    parser.add_argument("--robot", default="panda", choices=available_robots(), help="robot model")
     parser.add_argument("--target", default="cup", help="target object word or phrase, e.g. cup, capsule, hammer, red apple")
+    parser.add_argument("--target-file", default=None, help="JSON file with additional target specs")
     parser.add_argument("--trajectory", default="circle", choices=available_trajectories(), help="target motion")
     parser.add_argument("--task", default="contact", choices=available_tasks(), help="servo objective")
     parser.add_argument("--detector", default="oracle", choices=("oracle", "color", "semantic"), help="perception backend")
@@ -37,7 +39,9 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
     standoff_m = float(args.standoff) if args.standoff is not None else float(args.standoff_cm) / 100.0
     controller = ControllerConfig(task=args.task, standoff_m=standoff_m)
     return DemoConfig(
+        robot=args.robot,
         target=args.target,
+        target_file=args.target_file,
         trajectory=args.trajectory,
         detector=args.detector,
         steps=args.steps,
