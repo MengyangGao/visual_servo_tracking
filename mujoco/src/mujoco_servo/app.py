@@ -11,6 +11,7 @@ import numpy as np
 
 from .config import DemoConfig, resolve_robot
 from .control import ResolvedRateController, ServoState
+from .depth import DepthBackend, build_depth_backend
 from .perception import CameraIntrinsics, CameraObservation, Detection, PerceptionBackend, build_perception
 from .scene import build_scene, frame_position, set_target_position, site_position
 from .targets import TargetMotion, load_target_specs, resolve_target
@@ -35,6 +36,8 @@ class RunSummary:
     truth_fallback_steps: int
     final_perception_age_s: float | None
     mean_camera_render_ms: float
+    depth_backend: str
+    depth_metric: bool
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -62,6 +65,7 @@ class VisualServoSimulation:
         )
         self.controller.reset(self.scene.data)
         self._substeps = max(1, int(round((1.0 / config.controller.control_hz) / self.scene.model.opt.timestep)))
+        self.depth_backend: DepthBackend = build_depth_backend(config.depth)
         self._renderer = None
         self._manual_target_offset = np.zeros(3, dtype=float)
         self._manual_target_velocity = np.zeros(3, dtype=float)
@@ -79,6 +83,7 @@ class VisualServoSimulation:
         self._perception_disabled = False
         self._control_dt_s = self._substeps * float(self.scene.model.opt.timestep)
         self._camera_render_times_ms: list[float] = []
+        self._last_depth_metric = False
 
     def run(self) -> RunSummary:
         viewer = None
@@ -112,7 +117,7 @@ class VisualServoSimulation:
                 print(f"viewer unavailable ({exc}); continuing headless")
             return None
 
-    def _render_camera_observation(self) -> CameraObservation | None:
+    def _render_camera_observation(self, resolve_learned_depth: bool = True) -> CameraObservation | None:
         if self.detector_name == "oracle":
             return None
         render_start = time.perf_counter()
@@ -122,8 +127,19 @@ class VisualServoSimulation:
         rgb = self._renderer.render()
         self._renderer.enable_depth_rendering()
         self._renderer.update_scene(self.scene.data, camera=self.scene.camera_name)
-        depth = self._renderer.render().copy()
+        rendered_depth = self._renderer.render().copy()
         self._renderer.disable_depth_rendering()
+        frame_bgr = rgb[:, :, ::-1].copy()
+        if resolve_learned_depth or self.depth_backend.name in {"mujoco", "none"}:
+            depth = self.depth_backend.estimate(frame_bgr, rendered_depth)
+            depth_m = depth.depth_m
+            depth_backend = depth.backend
+            depth_metric = depth.metric
+        else:
+            depth_m = np.asarray(rendered_depth, dtype=np.float32).copy()
+            depth_backend = "mujoco-hint"
+            depth_metric = True
+        self._last_depth_metric = depth_metric
         cam_id = mujoco.mj_name2id(self.scene.model, mujoco.mjtObj.mjOBJ_CAMERA, self.scene.camera_name)
         fovy = float(self.scene.model.cam_fovy[cam_id])
         fy = 0.5 * self.config.camera.height / np.tan(np.deg2rad(fovy) * 0.5)
@@ -136,12 +152,14 @@ class VisualServoSimulation:
             height=self.config.camera.height,
         )
         observation = CameraObservation(
-            frame_bgr=rgb[:, :, ::-1].copy(),
-            depth_m=depth,
+            frame_bgr=frame_bgr,
+            depth_m=depth_m,
             intrinsics=intrinsics,
             camera_position=np.array(self.scene.data.cam_xpos[cam_id], dtype=float),
             camera_xmat=np.array(self.scene.data.cam_xmat[cam_id], dtype=float).reshape(3, 3),
             wall_time_s=render_start,
+            depth_backend=depth_backend,
+            depth_metric=depth_metric,
         )
         self._camera_render_times_ms.append((time.perf_counter() - render_start) * 1000.0)
         return observation
@@ -222,6 +240,8 @@ class VisualServoSimulation:
             truth_fallback_steps=truth_fallback_steps,
             final_perception_age_s=self._perception_age_s(),
             mean_camera_render_ms=float(np.mean(self._camera_render_times_ms)) if self._camera_render_times_ms else 0.0,
+            depth_backend=self.depth_backend.name,
+            depth_metric=self._last_depth_metric,
         )
 
     def _uses_async_perception(self, viewer) -> bool:
@@ -242,10 +262,11 @@ class VisualServoSimulation:
         if self._uses_async_perception(viewer):
             return self._update_async_perception(truth_position)
         observation = self._render_camera_observation()
+        observation = self._resolve_observation_depth(observation)
         detection = perception.detect(observation, truth_position, self.target, self.config.target)
         self._last_detection = detection
         if detection.success:
-            self._last_detection_wall_time = observation.wall_time_s or time.perf_counter()
+            self._last_detection_wall_time = observation.wall_time_s if observation is not None and observation.wall_time_s else time.perf_counter()
         self._latest_overlay_bgr = self._draw_camera_overlay(observation, detection, False)
         self._latest_overlay_rgb = None
         return detection
@@ -271,7 +292,7 @@ class VisualServoSimulation:
         camera_period = 1.0 / max(0.5, float(self.config.camera_fps))
         should_sample = self._perception_future is None and now - self._last_camera_wall_time >= camera_period
         if should_sample:
-            observation = self._render_camera_observation()
+            observation = self._render_camera_observation(resolve_learned_depth=False)
             self._last_camera_wall_time = now
             self._latest_overlay_bgr = self._draw_camera_overlay(observation, None, True)
             self._latest_overlay_rgb = None
@@ -289,7 +310,24 @@ class VisualServoSimulation:
 
     def _detect_in_worker(self, observation: CameraObservation, truth_position: np.ndarray, target, prompt: str) -> tuple[CameraObservation, Detection]:
         perception = self._ensure_perception()
+        observation = self._resolve_observation_depth(observation)
         return observation, perception.detect(observation, truth_position, target, prompt)
+
+    def _resolve_observation_depth(self, observation: CameraObservation | None) -> CameraObservation | None:
+        if observation is None or observation.depth_backend != "mujoco-hint":
+            return observation
+        depth = self.depth_backend.estimate(observation.frame_bgr, observation.depth_m)
+        self._last_depth_metric = depth.metric
+        return CameraObservation(
+            frame_bgr=observation.frame_bgr,
+            depth_m=depth.depth_m,
+            intrinsics=observation.intrinsics,
+            camera_position=observation.camera_position,
+            camera_xmat=observation.camera_xmat,
+            wall_time_s=observation.wall_time_s,
+            depth_backend=depth.backend,
+            depth_metric=depth.metric,
+        )
 
     def _target_position(self, time_s: float) -> np.ndarray:
         if self.config.manual_control:
@@ -381,6 +419,11 @@ class VisualServoSimulation:
             label = f"{detection.backend} score={detection.score:.2f}"
             if detection.anchor_type != "unknown":
                 label = f"{label} {detection.anchor_type}"
+        if observation is not None:
+            depth_label = f"depth={observation.depth_backend}"
+            if not observation.depth_metric:
+                depth_label = f"{depth_label} relative"
+            cv2.putText(image, depth_label, (10, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(image, label, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(image, self.config.target, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
         return image

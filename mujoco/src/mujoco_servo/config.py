@@ -62,6 +62,14 @@ class ControllerConfig:
 
 
 @dataclass(frozen=True)
+class DepthConfig:
+    backend: str = "mujoco"
+    model: str = "depth-anything/Depth-Anything-V2-Small-hf"
+    device: str = "auto"
+    metric_hint: bool = True
+
+
+@dataclass(frozen=True)
 class RobotSpec:
     name: str
     xml_path: Path
@@ -132,7 +140,7 @@ class DemoConfig:
     target: str = "cup"
     target_file: str | None = None
     trajectory: str = "circle"
-    detector: str = "oracle"
+    detector: str = "semantic"
     steps: int = 1200
     headless: bool = False
     viewer: bool = True
@@ -144,6 +152,7 @@ class DemoConfig:
     overlay_width_fraction: float = 0.42
     seed: int = 7
     camera: CameraConfig = field(default_factory=CameraConfig)
+    depth: DepthConfig = field(default_factory=DepthConfig)
     controller: ControllerConfig = field(default_factory=ControllerConfig)
 
 
@@ -177,3 +186,7 @@ def available_tasks() -> tuple[str, ...]:
 
 def available_trajectories() -> tuple[str, ...]:
     return ("static", "circle", "figure-eight", "random-walk", "waypoints")
+
+
+def available_depth_backends() -> tuple[str, ...]:
+    return ("mujoco", "depth-anything-v2", "none")

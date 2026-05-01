@@ -4,7 +4,7 @@ import argparse
 import json
 
 from .app import run_demo
-from .config import CameraConfig, ControllerConfig, DemoConfig, available_robots, available_tasks, available_trajectories
+from .config import CameraConfig, ControllerConfig, DemoConfig, DepthConfig, available_depth_backends, available_robots, available_tasks, available_trajectories
 from .targets import TARGETS
 
 
@@ -15,7 +15,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-file", default=None, help="JSON file with additional target specs")
     parser.add_argument("--trajectory", default="circle", choices=available_trajectories(), help="target motion")
     parser.add_argument("--task", default="contact", choices=available_tasks(), help="servo objective")
-    parser.add_argument("--detector", default="oracle", choices=("oracle", "color", "semantic"), help="perception backend")
+    parser.add_argument("--detector", default="semantic", choices=("semantic", "oracle", "color"), help="perception backend; semantic is the primary path")
+    parser.add_argument("--depth-backend", default="mujoco", choices=available_depth_backends(), help="depth provider for 3D target anchors")
+    parser.add_argument("--depth-model", default="depth-anything/Depth-Anything-V2-Small-hf", help="Hugging Face model for --depth-backend depth-anything-v2")
+    parser.add_argument("--depth-device", default="auto", help="device for optional learned depth backend: auto, cpu, mps, or cuda")
+    parser.add_argument("--no-depth-metric-hint", action="store_true", help="do not calibrate learned depth with MuJoCo metric depth")
     parser.add_argument("--steps", type=int, default=1200, help="control steps to run")
     parser.add_argument("--headless", action="store_true", help="run without the MuJoCo viewer")
     parser.add_argument("--no-realtime", action="store_true", help="do not sleep to match wall-clock time")
@@ -38,6 +42,12 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
     camera = CameraConfig(width=args.camera_width, height=args.camera_height)
     standoff_m = float(args.standoff) if args.standoff is not None else float(args.standoff_cm) / 100.0
     controller = ControllerConfig(task=args.task, standoff_m=standoff_m)
+    depth = DepthConfig(
+        backend=args.depth_backend,
+        model=args.depth_model,
+        device=args.depth_device,
+        metric_hint=not args.no_depth_metric_hint,
+    )
     return DemoConfig(
         robot=args.robot,
         target=args.target,
@@ -55,6 +65,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         overlay_width_fraction=min(0.75, max(0.15, float(args.overlay_width_frac))),
         seed=args.seed,
         camera=camera,
+        depth=depth,
         controller=controller,
     )
 

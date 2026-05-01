@@ -78,6 +78,7 @@ def test_semantic_detect_reuses_initialized_local_tracker_without_models() -> No
     semantic._last_mask[42:78, 62:98] = 255
     semantic._last_detection = None
     semantic._hsv_center = np.array([0, 255, 230], dtype=float)
+    semantic._last_depth_median = 1.0
     detection = semantic.detect(observation, np.zeros(3, dtype=float), target, "apple")
     assert detection.success
     assert detection.backend == "semantic-track"

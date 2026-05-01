@@ -28,6 +28,8 @@ class CameraObservation:
     camera_position: np.ndarray
     camera_xmat: np.ndarray
     wall_time_s: float = 0.0
+    depth_backend: str = "unknown"
+    depth_metric: bool = False
 
 
 @dataclass(slots=True)
@@ -214,6 +216,7 @@ class SemanticPerception:
         self._last_mask: np.ndarray | None = None
         self._last_detection: Detection | None = None
         self._hsv_center: np.ndarray | None = None
+        self._last_depth_median: float | None = None
         self._frames_since_redetect = 0
         self._track_failures = 0
         self._redetect_interval = int(os.getenv("MUJOCO_SERVO_REDETECT_INTERVAL", "45"))
@@ -282,6 +285,7 @@ class SemanticPerception:
             self._last_mask = mask.copy()
             self._last_detection = detection
             self._hsv_center = self._mask_hsv_center(observation.frame_bgr, mask)
+            self._last_depth_median = self._mask_depth_median(observation.depth_m, mask)
         return detection
 
     def _sam_mask(self, image, bbox: np.ndarray) -> np.ndarray:
@@ -300,7 +304,9 @@ class SemanticPerception:
     def _track_from_last_mask(self, observation: CameraObservation) -> Detection:
         if self._last_bbox is None:
             return Detection(False, self.name, None)
-        mask = self._local_color_mask(observation.frame_bgr)
+        mask = self._local_depth_mask(observation.depth_m)
+        if mask is None:
+            mask = self._local_color_mask(observation.frame_bgr)
         if mask is None:
             mask = self._bbox_roi_mask(observation.frame_bgr.shape, self._last_bbox)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -332,7 +338,27 @@ class SemanticPerception:
             self._last_bbox = bbox.copy()
             self._last_mask = mask.copy()
             self._last_detection = detection
+            self._last_depth_median = self._mask_depth_median(observation.depth_m, mask)
         return detection
+
+    def _local_depth_mask(self, depth_m: np.ndarray) -> np.ndarray | None:
+        if self._last_bbox is None or self._last_depth_median is None:
+            return None
+        depth = np.asarray(depth_m, dtype=float)
+        if not np.isfinite(self._last_depth_median) or self._last_depth_median <= 0.0:
+            return None
+        x1, y1, x2, y2 = self._expanded_bbox((*depth.shape, 1), self._last_bbox, 1.2)
+        roi = depth[y1:y2, x1:x2]
+        valid = np.isfinite(roi) & (roi > 0.0)
+        if not np.any(valid):
+            return None
+        tolerance = max(0.035, 0.12 * float(self._last_depth_median))
+        roi_mask = valid & (np.abs(roi - float(self._last_depth_median)) <= tolerance)
+        mask = np.zeros(depth.shape, dtype=np.uint8)
+        mask[y1:y2, x1:x2] = roi_mask.astype(np.uint8) * 255
+        kernel = np.ones((5, 5), dtype=np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
     def _local_color_mask(self, frame_bgr: np.ndarray) -> np.ndarray | None:
         if self._last_bbox is None or self._hsv_center is None:
@@ -378,6 +404,13 @@ class SemanticPerception:
             return None
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         return np.median(hsv[valid], axis=0)
+
+    @staticmethod
+    def _mask_depth_median(depth_m: np.ndarray, mask: np.ndarray) -> float | None:
+        valid = (mask > 0) & np.isfinite(depth_m) & (depth_m > 0.0)
+        if not np.any(valid):
+            return None
+        return float(np.median(depth_m[valid]))
 
     def _to_device(self, inputs):
         converted = {}

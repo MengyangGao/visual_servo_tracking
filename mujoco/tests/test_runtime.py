@@ -7,8 +7,10 @@ import pytest
 
 from ._bootstrap import SRC  # noqa: F401
 
+from mujoco_servo import app as app_module
 from mujoco_servo.app import VisualServoSimulation
 from mujoco_servo.config import ControllerConfig, DemoConfig
+from mujoco_servo.perception import Detection
 from mujoco_servo.scene import frame_position
 
 
@@ -89,6 +91,33 @@ def test_non_oracle_without_detection_holds_end_effector(monkeypatch) -> None:
     assert summary.perception_updates == 0
 
 
+def test_semantic_mock_detection_drives_without_truth_fallback(monkeypatch) -> None:
+    class FakeSemantic:
+        name = "semantic"
+
+        def detect(self, observation, truth_position, target, prompt):
+            return Detection(True, "semantic-test", np.array([0.48, 0.02, 0.34], dtype=float), score=0.9)
+
+    monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="static",
+        detector="semantic",
+        steps=12,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        controller=ControllerConfig(task="contact", control_hz=120.0),
+    )
+    app = VisualServoSimulation(cfg)
+    monkeypatch.setattr(app, "_render_camera_observation", lambda: None)
+    summary = app.run()
+    assert summary.detector == "semantic"
+    assert summary.perception_updates == 12
+    assert summary.truth_fallback_steps == 0
+    assert summary.oracle_truth_steps == 0
+
+
 def test_alternate_robot_headless_smoke() -> None:
     cfg = DemoConfig(
         robot="ur5e",
@@ -111,6 +140,10 @@ def test_semantic_viewer_mode_lazily_loads_backend() -> None:
     app = VisualServoSimulation(cfg)
     assert app.perception is None
     assert app.detector_name == "semantic"
+
+
+def test_default_detector_is_semantic() -> None:
+    assert DemoConfig().detector == "semantic"
 
 
 def test_viewer_key_controls_use_requested_shortcuts() -> None:

@@ -12,10 +12,10 @@ The MuJoCo project is the current active simulator. It builds a scene with:
 - a selectable Menagerie robot arm, defaulting to Franka Emika Panda,
 - a modular target object selected by word, such as `apple`, `cup`, `box`, `sphere`, or `capsule`, with optional JSON target files,
 - a fixed robot perception camera named `servo_camera`,
-- a passive MuJoCo viewer with a top-right robot-camera overlay showing image detections, masks, boxes, and tracker state,
+- a passive MuJoCo viewer with a top-right robot-camera overlay showing semantic detections, masks, depth source, boxes, and tracker state,
 - task modes including direct contact and front standoff tracking at a requested distance.
 
-The semantic perception path uses `GroundingDINO` for the first open-vocabulary box detection, `SAM` for the initial mask, then a local mask/color/depth tracker for subsequent frames. The viewer loop is decoupled from semantic inference so the main MuJoCo view keeps running while model inference is pending.
+Semantic perception is the primary path. It uses `GroundingDINO` for open-vocabulary box detection, `SAM` for the initial mask, then a local mask/depth tracker for subsequent frames. Depth is explicit and modular: simulation defaults to fast metric MuJoCo depth, while `--depth-backend depth-anything-v2` enables an optional learned monocular depth backend through Hugging Face Transformers. The viewer loop is decoupled from semantic and learned-depth inference so the main MuJoCo view keeps running while model inference is pending.
 
 ### Setup
 
@@ -55,22 +55,27 @@ conda run -n visual_servo mjpython mujoco/scripts/demo.py \
   --task front-standoff \
   --standoff-cm 10 \
   --detector semantic \
+  --depth-backend mujoco \
+  --camera-fps 6 \
   --steps 1000000
 ```
 
-For a lighter detector:
+Use learned monocular depth when you want to test camera-only depth behavior. This is slower than MuJoCo metric depth, so keep `--camera-fps` modest:
 
 ```bash
 conda run -n visual_servo mjpython mujoco/scripts/demo.py \
   --robot panda \
-  --target cup \
-  --trajectory circle \
-  --task contact \
-  --detector color \
+  --target "red cup" \
+  --trajectory static \
+  --task front-standoff \
+  --detector semantic \
+  --depth-backend depth-anything-v2 \
+  --depth-model depth-anything/Depth-Anything-V2-Small-hf \
+  --camera-fps 2 \
   --steps 1000000
 ```
 
-Headless smoke run:
+Debug-only oracle smoke run, useful when validating robot/control changes without model downloads:
 
 ```bash
 conda run -n visual_servo python mujoco/scripts/demo.py \
@@ -79,9 +84,11 @@ conda run -n visual_servo python mujoco/scripts/demo.py \
   --target cup \
   --trajectory static \
   --task contact \
-  --detector color \
+  --detector oracle \
   --no-realtime
 ```
+
+Debug-only color segmentation is still available with `--detector color`, but it is not the primary path.
 
 ### Controls
 
@@ -105,7 +112,11 @@ Target offsets are keyboard-controlled.
 - `--trajectory`: `static`, `circle`, `figure-eight`, `random-walk`, or `waypoints`.
 - `--task`: `contact`, `standoff`, `front-standoff`, `align-x`, `align-y`, or `align-z`.
 - `--standoff-cm`: distance for standoff modes.
-- `--detector`: `oracle`, `color`, or `semantic`.
+- `--detector`: `semantic`, `oracle`, or `color`; default is `semantic`.
+- `--depth-backend`: `mujoco`, `depth-anything-v2`, or `none`; default is metric `mujoco`.
+- `--depth-model`: Hugging Face model id for learned depth, default `depth-anything/Depth-Anything-V2-Small-hf`.
+- `--depth-device`: `auto`, `cpu`, `mps`, or `cuda`.
+- `--no-depth-metric-hint`: disables MuJoCo metric-depth calibration for learned depth.
 - `--camera-fps`: robot-camera processing rate in viewer mode.
 - `--overlay-width-frac`: top-right overlay width as a fraction of viewer width.
 - `--no-camera-overlay`: hide the robot-camera overlay.
