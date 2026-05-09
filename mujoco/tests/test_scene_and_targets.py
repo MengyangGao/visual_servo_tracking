@@ -37,6 +37,12 @@ def test_scene_can_load_alternate_robot_spec() -> None:
     assert scene.robot.dof == 6
 
 
+def test_scene_accepts_robot_specific_target_position() -> None:
+    scene = build_scene(resolve_target("apple"), CameraConfig(), robot="ur5e", target_position=np.array([-0.3, 0.3, 0.33]))
+    target = site_position(scene.model, scene.data, "target_site")
+    assert np.allclose(target, [-0.3, 0.3, 0.33], atol=1e-6)
+
+
 def test_target_trajectories_are_smooth_and_moving() -> None:
     target = resolve_target("bottle")
     motion = TargetMotion(target, "figure-eight")
@@ -80,3 +86,50 @@ def test_custom_target_file_adds_replaceable_target(tmp_path) -> None:
     assert target.name == "banana"
     assert target.shape == "capsule"
     assert np.allclose(base_position(target), [0.42, -0.05, 0.36])
+
+
+def test_custom_target_exact_match_beats_builtin_substring(tmp_path) -> None:
+    target_file = tmp_path / "targets.json"
+    target_file.write_text(
+        json.dumps(
+            {
+                "targets": [
+                    {
+                        "name": "urbox",
+                        "shape": "box",
+                        "size": [0.07, 0.07, 0.07],
+                        "rgba": [0.2, 0.7, 0.2, 1.0],
+                    }
+                ]
+            }
+        )
+    )
+    extra = load_target_specs(target_file)
+    target = resolve_target("urbox", extra)
+    assert target.name == "urbox"
+
+
+def test_custom_target_part_offset_alias_is_supported(tmp_path) -> None:
+    target_file = tmp_path / "targets.json"
+    target_file.write_text(
+        json.dumps(
+            {
+                "targets": [
+                    {
+                        "name": "offset-object",
+                        "parts": [
+                            {
+                                "shape": "box",
+                                "size": [0.04, 0.04, 0.04],
+                                "offset": [0.02, -0.01, 0.03],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    extra = load_target_specs(target_file)
+    target = resolve_target("offset-object", extra)
+    assert target.parts
+    assert np.allclose(target.parts[0].pos, [0.02, -0.01, 0.03], atol=1e-9)

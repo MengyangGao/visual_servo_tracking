@@ -326,6 +326,10 @@ class SemanticPerception:
         area = float(cv2.contourArea(contour))
         if area < 16.0:
             return Detection(False, self.name, None, mask=mask)
+        if self._last_mask is not None:
+            last_area = float(np.count_nonzero(self._last_mask))
+            if last_area > 0.0 and area > 2.2 * last_area:
+                return Detection(False, self.name, None, mask=mask)
         x, y, w, h = cv2.boundingRect(contour)
         bbox = np.array([x, y, x + w, y + h], dtype=float)
         position, mask, bbox_min, bbox_max, anchor_type = _estimate_world_position(observation, bbox, mask)
@@ -357,7 +361,7 @@ class SemanticPerception:
         depth = np.asarray(depth_m, dtype=float)
         if not np.isfinite(self._last_depth_median) or self._last_depth_median <= 0.0:
             return None
-        x1, y1, x2, y2 = self._expanded_bbox((*depth.shape, 1), self._last_bbox, 1.2)
+        x1, y1, x2, y2 = self._expanded_bbox((*depth.shape, 1), self._last_bbox, 0.35)
         roi = depth[y1:y2, x1:x2]
         valid = np.isfinite(roi) & (roi > 0.0)
         if not np.any(valid):
@@ -374,7 +378,7 @@ class SemanticPerception:
         if self._last_bbox is None or self._hsv_center is None:
             return None
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        x1, y1, x2, y2 = self._expanded_bbox(frame_bgr.shape, self._last_bbox, 1.2)
+        x1, y1, x2, y2 = self._expanded_bbox(frame_bgr.shape, self._last_bbox, 0.6)
         hue = int(self._hsv_center[0])
         sat = int(self._hsv_center[1])
         val = int(self._hsv_center[2])

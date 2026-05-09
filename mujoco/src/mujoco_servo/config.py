@@ -81,6 +81,8 @@ class RobotSpec:
     ee_frame_type: str
     ee_frame_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     passive_actuator_ctrl: tuple[tuple[str, float], ...] = ()
+    default_target_position: tuple[float, float, float] | None = None
+    detection_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
     aliases: tuple[str, ...] = ()
 
     @property
@@ -100,6 +102,8 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         ee_frame_type="body_point",
         ee_frame_offset=(0.0, 0.0, 0.10),
         passive_actuator_ctrl=(("actuator8", 255.0),),
+        default_target_position=(0.44, 0.13, 0.33),
+        detection_bounds=((0.05, -0.55, 0.05), (0.85, 0.55, 0.85)),
         aliases=("franka", "franka-panda", "franka_emika_panda"),
     ),
     "ur5e": RobotSpec(
@@ -118,6 +122,8 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         home_qpos=(-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0),
         ee_frame_name="attachment_site",
         ee_frame_type="site",
+        default_target_position=(-0.30, 0.30, 0.33),
+        detection_bounds=((-0.80, -0.55, 0.05), (0.40, 0.75, 0.95)),
         aliases=("universal-robots-ur5e", "universal_robots_ur5e", "ur"),
     ),
     "lite6": RobotSpec(
@@ -129,6 +135,8 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         home_qpos=(0.0, 0.0, 1.57, 0.0, 1.57, 0.0),
         ee_frame_name="attachment_site",
         ee_frame_type="site",
+        default_target_position=(0.32, 0.10, 0.28),
+        detection_bounds=((-0.35, -0.55, 0.05), (0.85, 0.55, 0.85)),
         aliases=("ufactory-lite6", "ufactory_lite6", "xarm-lite6"),
     ),
 }

@@ -2,6 +2,7 @@
 
 Implement the MuJoCo review findings so the simulator moves toward smooth, general semantic visual servoing with replaceable target objects and replaceable robot arms.
 Extend that implementation so semantic perception is the primary path, depth is modeled as an explicit backend, and the user-facing commands document what each mode does.
+Complete final acceptance for detector modes, robot/target swapping, and stability regressions; then deliver a clean checkpoint commit.
 
 # User Value
 
@@ -20,6 +21,7 @@ Extend that implementation so semantic perception is the primary path, depth is 
 - Keep tests fast by mocking heavy semantic/depth model calls instead of downloading or running large models in the normal suite.
 - Use the existing `visual_servo` Conda environment for validation.
 - Do not push or open a PR.
+- Keep viewer-related behavior safe on macOS where AppKit calls must stay on the main thread.
 
 # Assumptions
 
@@ -55,6 +57,15 @@ Extend that implementation so semantic perception is the primary path, depth is 
 9. Make semantic the default detector while preserving explicit `--detector oracle` and `--detector color` debug modes.
 10. Add a depth backend module with `mujoco`, `none`, and optional `depth-anything-v2` providers, plus tests using a fake model pipeline.
 11. Update README commands to explain semantic/depth combinations and performance controls.
+12. Run final acceptance matrix for `oracle`, `color`, `semantic`, robot swaps, and custom target swaps.
+13. Fix any discovered regressions in target resolution, control stability, and runtime crash paths.
+14. Re-run full tests and create a final local commit.
+
+# Overlooked Risks / Edge Cases
+
+1. Target-name substring collisions (example: `urbox` accidentally matching built-in `box`) can silently select the wrong object.
+2. Semantic detector warmup can return zero updates for many steps; control may appear frozen unless hold logic and diagnostics are explicit.
+3. Viewer mode plus background model loading on macOS can trigger AppKit thread violations and crash (`NSScreen reconfig must only happen on the main thread`).
 
 # Validation
 

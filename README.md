@@ -17,6 +17,12 @@ The MuJoCo project is the current active simulator. It builds a scene with:
 
 Semantic perception is the primary path. It uses `GroundingDINO` for open-vocabulary box detection, `SAM` for the initial mask, then a local mask/depth tracker for subsequent frames. Depth is explicit and modular: simulation defaults to fast metric MuJoCo depth, while `--depth-backend depth-anything-v2` enables an optional learned monocular depth backend through Hugging Face Transformers. The viewer loop is decoupled from semantic and learned-depth inference so the main MuJoCo view keeps running while model inference is pending.
 
+Detection backends:
+
+- `semantic` (default): open-vocabulary visual servo with depth-assisted 3D anchor estimation.
+- `color`: HSV mask debug backend for controlled color targets.
+- `oracle`: simulator truth debug backend (`target_site`) for controller smoke tests.
+
 ### Setup
 
 Use the project conda environment:
@@ -59,7 +65,7 @@ conda run -n visual_servo mjpython mujoco/scripts/demo.py \
   --camera-fps 3
 ```
 
-The first semantic run can pause while Hugging Face weights load. On macOS, model loading is intentionally done on the main thread before the MuJoCo viewer starts; inference then runs asynchronously so the viewer does not crash on AppKit main-thread checks. Viewer runs default to a long session, so `--steps` is usually unnecessary.
+The first semantic run can pause while Hugging Face weights load. On macOS, viewer mode keeps perception on the main thread to avoid AppKit thread crashes (`NSScreen reconfig must only happen on the main thread`). Viewer runs default to a long session, so `--steps` is usually unnecessary.
 
 Use learned monocular depth when you want to test camera-only depth behavior. This is slower than MuJoCo metric depth, so keep `--camera-fps` modest:
 
@@ -89,6 +95,25 @@ conda run -n visual_servo python mujoco/scripts/demo.py \
 ```
 
 Debug-only color segmentation is still available with `--detector color`, but it is not the primary path.
+
+Headless acceptance matrix examples:
+
+```bash
+# semantic (primary)
+conda run -n visual_servo python mujoco/scripts/demo.py \
+  --headless --detector semantic --robot panda --target apple \
+  --trajectory static --task front-standoff --steps 180 --camera-fps 6 --no-realtime
+
+# color (debug)
+conda run -n visual_servo python mujoco/scripts/demo.py \
+  --headless --detector color --robot panda --target apple \
+  --trajectory static --task front-standoff --steps 180 --no-realtime
+
+# oracle (debug)
+conda run -n visual_servo python mujoco/scripts/demo.py \
+  --headless --detector oracle --robot panda --target apple \
+  --trajectory static --task front-standoff --steps 180 --no-realtime
+```
 
 ### Controls
 
@@ -124,6 +149,12 @@ Target offsets are keyboard-controlled.
 - `--overlay-width-frac`: top-right overlay width as a fraction of viewer width.
 - `--no-camera-overlay`: hide the robot-camera overlay.
 - `--list-targets`: print built-in target names.
+
+Robot/target swapping notes:
+
+- Each robot has its own default target workspace center so `oracle` control is reachable out-of-the-box (`panda`, `lite6`, `ur5e`).
+- `--target-file` custom targets take exact-name priority over built-in targets (example: `urbox` will not be mistaken for built-in `box`).
+- Custom target part entries accept both `pos` and `offset` keys.
 
 ### Validation
 

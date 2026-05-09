@@ -14,7 +14,7 @@ from .control import ResolvedRateController, ServoState
 from .depth import DepthBackend, build_depth_backend
 from .perception import CameraIntrinsics, CameraObservation, Detection, PerceptionBackend, build_perception
 from .scene import build_scene, frame_position, set_target_position, site_position
-from .targets import TargetMotion, load_target_specs, resolve_target
+from .targets import TargetMotion, base_position, load_target_specs, resolve_target
 
 
 @dataclass(slots=True)
@@ -50,8 +50,13 @@ class VisualServoSimulation:
         self.robot = resolve_robot(config.robot)
         self.extra_targets = load_target_specs(config.target_file)
         self.target = resolve_target(config.target, self.extra_targets)
-        self.scene = build_scene(self.target, config.camera, self.robot)
-        self.motion = TargetMotion(self.target, config.trajectory, config.seed)
+        self._target_base_position = (
+            np.array(self.robot.default_target_position, dtype=float).reshape(3)
+            if self.robot.default_target_position is not None
+            else base_position(self.target)
+        )
+        self.scene = build_scene(self.target, config.camera, self.robot, target_position=self._target_base_position)
+        self.motion = TargetMotion(self.target, config.trajectory, config.seed, base_override=self._target_base_position)
         self.detector_name = config.detector.strip().lower()
         self.perception: PerceptionBackend | None = None
         if not self._should_lazy_load_perception():
@@ -261,7 +266,10 @@ class VisualServoSimulation:
         )
 
     def _uses_async_perception(self, viewer) -> bool:
-        return viewer is not None and self.detector_name != "oracle"
+        if viewer is None or self.detector_name == "oracle":
+            return False
+        # On macOS, keep MuJoCo viewer + perception on the main thread to avoid AppKit thread crashes.
+        return sys.platform != "darwin"
 
     def _should_lazy_load_perception(self) -> bool:
         return False
@@ -337,8 +345,12 @@ class VisualServoSimulation:
         position = np.asarray(detection.target_position, dtype=float).reshape(3)
         if not np.isfinite(position).all():
             return False
-        lower = np.array([0.05, -0.55, 0.05], dtype=float)
-        upper = np.array([0.85, 0.55, 0.85], dtype=float)
+        if self.robot.detection_bounds is None:
+            lower = np.array([0.05, -0.55, 0.05], dtype=float)
+            upper = np.array([0.85, 0.55, 0.85], dtype=float)
+        else:
+            lower = np.array(self.robot.detection_bounds[0], dtype=float).reshape(3)
+            upper = np.array(self.robot.detection_bounds[1], dtype=float).reshape(3)
         if np.any(position < lower) or np.any(position > upper):
             return False
         if self._last_accepted_detection_position is not None:

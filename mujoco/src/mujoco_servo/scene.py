@@ -65,8 +65,7 @@ def _primitive_geom_xml(
     return "<geom " + " ".join(attrs) + "/>"
 
 
-def _tracking_worldbody_xml(target: TargetSpec, camera: CameraConfig) -> str:
-    target_pos = base_position(target)
+def _tracking_worldbody_xml(target: TargetSpec, camera: CameraConfig, target_pos: np.ndarray) -> str:
     camera_pos = np.array(camera.position, dtype=float)
     camera_lookat = np.array(camera.lookat, dtype=float)
     x_axis, y_axis = look_at_xyaxes(camera_pos, camera_lookat)
@@ -108,23 +107,29 @@ def _tracking_worldbody_xml(target: TargetSpec, camera: CameraConfig) -> str:
     ).strip()
 
 
-def build_menagerie_mjcf(target: TargetSpec, camera: CameraConfig, robot: RobotSpec) -> str:
+def build_menagerie_mjcf(target: TargetSpec, camera: CameraConfig, robot: RobotSpec, target_pos: np.ndarray) -> str:
     text = robot.xml_path.read_text()
     text = text.replace('meshdir="assets"', f'meshdir="{robot.asset_dir}"')
-    insertion = "\n" + _tracking_worldbody_xml(target, camera) + "\n"
+    insertion = "\n" + _tracking_worldbody_xml(target, camera, target_pos) + "\n"
     return text.replace("</mujoco>", f"{insertion}</mujoco>", 1)
 
 
-def build_scene(target: TargetSpec, camera: CameraConfig | None = None, robot: RobotSpec | str = "panda") -> Scene:
+def build_scene(
+    target: TargetSpec,
+    camera: CameraConfig | None = None,
+    robot: RobotSpec | str = "panda",
+    target_position: np.ndarray | None = None,
+) -> Scene:
     cam = camera or CameraConfig()
     robot_spec = resolve_robot(robot) if isinstance(robot, str) else robot
+    target_pos = np.asarray(base_position(target) if target_position is None else target_position, dtype=float).reshape(3)
     if not robot_spec.xml_path.exists() or not robot_spec.asset_dir.exists():
         raise FileNotFoundError(
             f"MuJoCo Menagerie assets for robot '{robot_spec.name}' are required. Run "
             "`git submodule update --init --recursive mujoco/vendor/mujoco_menagerie`."
         )
     source = "menagerie"
-    model = mujoco.MjModel.from_xml_string(build_menagerie_mjcf(target, cam, robot_spec))
+    model = mujoco.MjModel.from_xml_string(build_menagerie_mjcf(target, cam, robot_spec, target_pos))
     home = np.array(robot_spec.home_qpos, dtype=float)
     data = mujoco.MjData(model)
     mujoco.mj_resetDataKeyframe(model, data, 0)
@@ -134,7 +139,7 @@ def build_scene(target: TargetSpec, camera: CameraConfig | None = None, robot: R
             raise RuntimeError(f"robot '{robot_spec.name}' joint '{robot_spec.joint_names[i]}' not found")
         data.qpos[model.jnt_qposadr[joint_id]] = home[i]
     _set_robot_actuator_ctrl(model, data, robot_spec, home)
-    set_target_position(model, data, base_position(target))
+    set_target_position(model, data, target_pos)
     mujoco.mj_forward(model, data)
     return Scene(
         model=model,

@@ -126,10 +126,11 @@ def _target_part_from_mapping(entry: Any) -> TargetPart:
         raise ValueError("target parts must be objects")
     rgba = entry.get("rgba")
     quat = entry.get("quat")
+    pos_value = entry.get("pos", entry.get("offset", (0.0, 0.0, 0.0)))
     return TargetPart(
         shape=str(entry.get("shape", "box")).strip().lower(),
         size=_float_tuple(entry.get("size", (0.05, 0.05, 0.05)), 3, "part.size"),
-        pos=_float_tuple(entry.get("pos", (0.0, 0.0, 0.0)), 3, "part.pos"),
+        pos=_float_tuple(pos_value, 3, "part.pos"),
         rgba=None if rgba is None else _float_tuple(rgba, 4, "part.rgba"),
         quat=None if quat is None else _float_tuple(quat, 4, "part.quat"),
     )
@@ -150,9 +151,18 @@ def _float_tuple(value: Any, expected: int, field: str) -> tuple[float, ...]:
 
 def resolve_target(name_or_prompt: str, extra_targets: dict[str, TargetSpec] | None = None) -> TargetSpec:
     text = " ".join(name_or_prompt.lower().strip().split())
-    targets = {**TARGETS, **(extra_targets or {})}
+    extra = extra_targets or {}
+    targets = {**TARGETS, **extra}
+    for collection in (extra, TARGETS):
+        if text in collection:
+            return collection[text]
+    for collection in (extra, TARGETS):
+        for spec in collection.values():
+            if any(text == alias for alias in spec.aliases):
+                return spec
+    words = set(text.split())
     for key, spec in targets.items():
-        if key in text or any(alias in text for alias in spec.aliases):
+        if key in words or any(alias in text for alias in spec.aliases):
             return spec
     safe_name = "_".join(part for part in text.split() if part.isalnum()) or "object"
     return TargetSpec(safe_name[:32], "box", (0.10, 0.10, 0.10), (0.85, 0.25, 0.25, 1.0), (text,))
@@ -169,25 +179,27 @@ class TargetMotion:
     target: TargetSpec
     mode: str
     seed: int = 7
+    base_override: np.ndarray | None = None
 
     def __post_init__(self) -> None:
+        self._base = np.array(self.base_override, dtype=float).reshape(3) if self.base_override is not None else base_position(self.target)
         self._rng = np.random.default_rng(self.seed)
         self._random_velocity = np.array([0.035, -0.025, 0.018], dtype=float)
-        self._random_pos = base_position(self.target)
+        self._random_pos = self._base.copy()
         self._last_time = 0.0
         self._waypoints = np.array(
             [
-                base_position(self.target) + np.array([0.00, 0.00, 0.00]),
-                base_position(self.target) + np.array([0.10, 0.05, 0.02]),
-                base_position(self.target) + np.array([0.04, -0.12, -0.015]),
-                base_position(self.target) + np.array([-0.08, -0.04, 0.025]),
+                self._base + np.array([0.00, 0.00, 0.00]),
+                self._base + np.array([0.10, 0.05, 0.02]),
+                self._base + np.array([0.04, -0.12, -0.015]),
+                self._base + np.array([-0.08, -0.04, 0.025]),
             ],
             dtype=float,
         )
 
     def position(self, time_s: float) -> np.ndarray:
         mode = self.mode.strip().lower()
-        base = base_position(self.target)
+        base = self._base
         t = float(max(time_s, 0.0))
         phase = (sum(ord(ch) for ch in self.target.name) % 360) * np.pi / 180.0
         if mode == "static":
@@ -209,8 +221,8 @@ class TargetMotion:
         jitter[2] *= 0.35
         self._random_velocity = 0.985 * self._random_velocity + 0.015 * jitter
         self._random_pos = self._random_pos + self._random_velocity * dt
-        low = base_position(self.target) + np.array([-0.13, -0.16, -0.05])
-        high = base_position(self.target) + np.array([0.13, 0.16, 0.06])
+        low = self._base + np.array([-0.13, -0.16, -0.05])
+        high = self._base + np.array([0.13, 0.16, 0.06])
         for i in range(3):
             if self._random_pos[i] < low[i] or self._random_pos[i] > high[i]:
                 self._random_velocity[i] *= -0.65
