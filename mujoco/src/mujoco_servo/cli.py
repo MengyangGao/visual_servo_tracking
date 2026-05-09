@@ -4,7 +4,7 @@ import argparse
 import json
 
 from .app import run_demo
-from .config import CameraConfig, ControllerConfig, DemoConfig, DepthConfig, available_depth_backends, available_robots, available_tasks, available_trajectories
+from .config import CameraConfig, ControllerConfig, DemoConfig, DepthConfig, available_depth_backends, available_robots, available_tasks, available_trajectories, validate_config
 from .targets import TARGETS
 
 
@@ -40,6 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> DemoConfig:
+    if args.steps is not None and args.steps < 0:
+        raise argparse.ArgumentTypeError("--steps must be non-negative")
+    if args.camera_width < 32 or args.camera_height < 32:
+        raise argparse.ArgumentTypeError("--camera-width and --camera-height must be at least 32")
+    if args.camera_fps <= 0.0:
+        raise argparse.ArgumentTypeError("--camera-fps must be positive")
+    if args.key_speed_cm_s < 0.0:
+        raise argparse.ArgumentTypeError("--key-speed-cm-s must be non-negative")
+    if args.standoff is not None and args.standoff < 0.0:
+        raise argparse.ArgumentTypeError("--standoff must be non-negative")
+    if args.standoff_cm < 0.0:
+        raise argparse.ArgumentTypeError("--standoff-cm must be non-negative")
     camera = CameraConfig(width=args.camera_width, height=args.camera_height)
     standoff_m = float(args.standoff) if args.standoff is not None else float(args.standoff_cm) / 100.0
     controller = ControllerConfig(task=args.task, standoff_m=standoff_m)
@@ -49,7 +61,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         device=args.depth_device,
         metric_hint=not args.no_depth_metric_hint,
     )
-    return DemoConfig(
+    config = DemoConfig(
         robot=args.robot,
         target=args.target,
         target_file=args.target_file,
@@ -70,6 +82,8 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         depth=depth,
         controller=controller,
     )
+    validate_config(config)
+    return config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,7 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_targets:
         print(json.dumps(sorted(TARGETS.keys()), indent=2))
         return 0
-    summary = run_demo(config_from_args(args))
+    try:
+        config = config_from_args(args)
+    except (ValueError, argparse.ArgumentTypeError) as exc:
+        parser.error(str(exc))
+    summary = run_demo(config)
     print(json.dumps(summary.as_dict(), indent=2, sort_keys=True))
     return 0
 

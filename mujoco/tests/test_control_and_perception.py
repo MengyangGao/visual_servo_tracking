@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import pytest
 
 from ._bootstrap import SRC  # noqa: F401
 
@@ -58,6 +59,36 @@ def test_color_segmentation_detects_render_like_blob() -> None:
     assert detection.world_bbox_max is not None
     assert 105 < detection.centroid_px[0] < 120
     assert 80 < detection.centroid_px[1] < 100
+
+
+def test_color_segmentation_handles_red_hue_wraparound() -> None:
+    target = resolve_target("apple")
+    image = np.zeros((120, 160, 3), dtype=np.uint8)
+    depth = np.ones((120, 160), dtype=np.float32)
+    observation = CameraObservation(
+        frame_bgr=image,
+        depth_m=depth,
+        intrinsics=CameraIntrinsics(fx=120.0, fy=120.0, cx=80.0, cy=60.0, width=160, height=120),
+        camera_position=np.zeros(3, dtype=float),
+        camera_xmat=np.eye(3, dtype=float),
+    )
+    cv2.circle(image, (80, 60), 18, (0, 0, 230), -1)
+    detection = ColorSegmentationPerception().detect(observation, np.array([0.4, 0.0, 0.3]), target, "apple")
+    assert detection.success
+    assert detection.bbox_xyxy is not None
+
+
+def test_observation_depth_shape_mismatch_is_rejected() -> None:
+    target = resolve_target("box")
+    observation = CameraObservation(
+        frame_bgr=np.zeros((12, 16, 3), dtype=np.uint8),
+        depth_m=np.ones((10, 16), dtype=np.float32),
+        intrinsics=CameraIntrinsics(fx=12.0, fy=12.0, cx=8.0, cy=6.0, width=16, height=12),
+        camera_position=np.zeros(3, dtype=float),
+        camera_xmat=np.eye(3, dtype=float),
+    )
+    with pytest.raises(ValueError, match="depth_m shape"):
+        ColorSegmentationPerception().detect(observation, np.zeros(3), target, "box")
 
 
 def test_depth_anchor_rejects_mask_depth_outliers() -> None:

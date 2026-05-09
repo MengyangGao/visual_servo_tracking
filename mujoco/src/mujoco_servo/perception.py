@@ -70,8 +70,11 @@ def _estimate_world_position(
     bbox_xyxy: np.ndarray,
     mask: np.ndarray | None,
 ) -> tuple[np.ndarray | None, np.ndarray, np.ndarray | None, np.ndarray | None, str]:
+    _validate_observation(observation)
     if mask is None:
         mask = _bbox_mask(observation.frame_bgr.shape, bbox_xyxy)
+    elif mask.shape != observation.frame_bgr.shape[:2]:
+        raise ValueError("mask shape must match observation frame shape")
     valid = mask > 0
     depth = np.asarray(observation.depth_m, dtype=float)
     valid &= np.isfinite(depth)
@@ -155,15 +158,14 @@ class ColorSegmentationPerception:
     def detect(self, observation: CameraObservation | None, truth_position: np.ndarray, target: TargetSpec, prompt: str) -> Detection:
         if observation is None:
             return Detection(False, self.name, None)
+        _validate_observation(observation)
         frame_bgr = observation.frame_bgr
         rgba = np.array(target.rgba[:3], dtype=float)
         target_bgr = np.array([rgba[2], rgba[1], rgba[0]], dtype=float) * 255.0
         hsv_color = cv2.cvtColor(np.uint8([[target_bgr]]), cv2.COLOR_BGR2HSV)[0, 0]
         frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         hue = int(hsv_color[0])
-        lower = np.array([max(0, hue - 12), 45, 35], dtype=np.uint8)
-        upper = np.array([min(179, hue + 12), 255, 255], dtype=np.uint8)
-        mask = cv2.inRange(frame_hsv, lower, upper)
+        mask = _hue_range_mask(frame_hsv, hue, tolerance=12, min_sat=45, min_val=35)
         kernel = np.ones((5, 5), dtype=np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
@@ -235,6 +237,7 @@ class SemanticPerception:
     def detect(self, observation: CameraObservation | None, truth_position: np.ndarray, target: TargetSpec, prompt: str) -> Detection:
         if observation is None:
             return Detection(False, self.name, None)
+        _validate_observation(observation)
         if self._initialized:
             self._frames_since_redetect = getattr(self, "_frames_since_redetect", 0) + 1
             redetect_interval = max(1, int(getattr(self, "_redetect_interval", 45)))
@@ -382,9 +385,7 @@ class SemanticPerception:
         hue = int(self._hsv_center[0])
         sat = int(self._hsv_center[1])
         val = int(self._hsv_center[2])
-        lower = np.array([max(0, hue - 14), max(35, sat - 70), max(25, val - 90)], dtype=np.uint8)
-        upper = np.array([min(179, hue + 14), 255, 255], dtype=np.uint8)
-        roi = cv2.inRange(hsv[y1:y2, x1:x2], lower, upper)
+        roi = _hue_range_mask(hsv[y1:y2, x1:x2], hue, tolerance=14, min_sat=max(35, sat - 70), min_val=max(25, val - 90))
         mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
         mask[y1:y2, x1:x2] = roi
         kernel = np.ones((5, 5), dtype=np.uint8)
@@ -447,3 +448,40 @@ def build_perception(name: str) -> PerceptionBackend:
     if normalized in {"semantic", "grounding-dino", "grounded-sam"}:
         return SemanticPerception()
     raise ValueError(f"unknown detector '{name}'")
+
+
+def _hue_range_mask(hsv: np.ndarray, hue: int, tolerance: int, min_sat: int, min_val: int) -> np.ndarray:
+    hue = int(hue) % 180
+    tolerance = max(0, int(tolerance))
+    low_h = hue - tolerance
+    high_h = hue + tolerance
+    sat = max(0, min(255, int(min_sat)))
+    val = max(0, min(255, int(min_val)))
+    if low_h < 0:
+        left = cv2.inRange(hsv, np.array([0, sat, val], dtype=np.uint8), np.array([high_h, 255, 255], dtype=np.uint8))
+        right = cv2.inRange(hsv, np.array([180 + low_h, sat, val], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8))
+        return cv2.bitwise_or(left, right)
+    if high_h > 179:
+        left = cv2.inRange(hsv, np.array([0, sat, val], dtype=np.uint8), np.array([high_h - 180, 255, 255], dtype=np.uint8))
+        right = cv2.inRange(hsv, np.array([low_h, sat, val], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8))
+        return cv2.bitwise_or(left, right)
+    return cv2.inRange(hsv, np.array([low_h, sat, val], dtype=np.uint8), np.array([high_h, 255, 255], dtype=np.uint8))
+
+
+def _validate_observation(observation: CameraObservation) -> None:
+    frame = np.asarray(observation.frame_bgr)
+    depth = np.asarray(observation.depth_m)
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError("observation frame_bgr must have shape (height, width, 3)")
+    if depth.shape != frame.shape[:2]:
+        raise ValueError("observation depth_m shape must match frame height/width")
+    if observation.intrinsics.width != frame.shape[1] or observation.intrinsics.height != frame.shape[0]:
+        raise ValueError("observation intrinsics size must match frame shape")
+    if observation.intrinsics.fx <= 0.0 or observation.intrinsics.fy <= 0.0:
+        raise ValueError("observation focal lengths must be positive")
+    if np.isinf(depth).any():
+        raise ValueError("observation depth_m must not contain infinite values")
+    if np.asarray(observation.camera_position).shape != (3,):
+        raise ValueError("observation camera_position must have shape (3,)")
+    if np.asarray(observation.camera_xmat).shape != (3, 3):
+        raise ValueError("observation camera_xmat must have shape (3, 3)")

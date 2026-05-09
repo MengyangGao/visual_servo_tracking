@@ -165,6 +165,66 @@ class DemoConfig:
     controller: ControllerConfig = field(default_factory=ControllerConfig)
 
 
+def validate_config(config: DemoConfig) -> None:
+    if config.steps < 0:
+        raise ValueError("steps must be non-negative")
+    if config.camera.width < 32 or config.camera.height < 32:
+        raise ValueError("camera width and height must be at least 32 pixels")
+    if not np.isfinite(config.camera_fps) or config.camera_fps <= 0.0:
+        raise ValueError("camera_fps must be positive")
+    if not np.isfinite(config.overlay_width_fraction) or not 0.05 <= config.overlay_width_fraction <= 0.95:
+        raise ValueError("overlay_width_fraction must be in [0.05, 0.95]")
+    if not np.isfinite(config.key_speed_mps) or config.key_speed_mps < 0.0:
+        raise ValueError("key_speed_mps must be non-negative")
+    _validate_controller_config(config.controller)
+    _validate_camera_config(config.camera)
+    _validate_depth_config(config.depth)
+
+
+def _validate_controller_config(config: ControllerConfig) -> None:
+    checks = {
+        "control_hz": config.control_hz,
+        "position_gain": config.position_gain,
+        "damping": config.damping,
+        "max_ee_speed": config.max_ee_speed,
+        "max_joint_speed": config.max_joint_speed,
+        "standoff_m": config.standoff_m,
+        "max_angular_speed": config.max_angular_speed,
+        "smooth_target_alpha": config.smooth_target_alpha,
+    }
+    for name, value in checks.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if config.control_hz <= 0.0:
+        raise ValueError("control_hz must be positive")
+    if config.damping <= 0.0:
+        raise ValueError("damping must be positive")
+    if config.max_ee_speed <= 0.0 or config.max_joint_speed <= 0.0:
+        raise ValueError("max speeds must be positive")
+    if config.standoff_m < 0.0:
+        raise ValueError("standoff_m must be non-negative")
+    if not 0.0 <= config.smooth_target_alpha <= 1.0:
+        raise ValueError("smooth_target_alpha must be in [0, 1]")
+
+
+def _validate_camera_config(config: CameraConfig) -> None:
+    if config.width < 32 or config.height < 32:
+        raise ValueError("camera width and height must be at least 32 pixels")
+    if not np.isfinite(config.fovy_deg) or not 1.0 <= config.fovy_deg <= 179.0:
+        raise ValueError("camera fovy_deg must be in [1, 179]")
+    for name, values in {"position": config.position, "lookat": config.lookat}.items():
+        array = np.asarray(values, dtype=float)
+        if array.shape != (3,) or not np.isfinite(array).all():
+            raise ValueError(f"camera {name} must contain three finite values")
+
+
+def _validate_depth_config(config: DepthConfig) -> None:
+    if not config.backend.strip():
+        raise ValueError("depth backend must be non-empty")
+    if not config.model.strip():
+        raise ValueError("depth model must be non-empty")
+
+
 def project_root() -> Path:
     return ROOT
 

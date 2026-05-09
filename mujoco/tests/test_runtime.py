@@ -9,7 +9,7 @@ from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo import app as app_module
 from mujoco_servo.app import VisualServoSimulation
-from mujoco_servo.config import ControllerConfig, DemoConfig
+from mujoco_servo.config import CameraConfig, ControllerConfig, DemoConfig
 from mujoco_servo.perception import Detection
 from mujoco_servo.scene import frame_position
 
@@ -89,6 +89,7 @@ def test_non_oracle_without_detection_holds_end_effector(monkeypatch) -> None:
     assert summary.truth_fallback_steps == 0
     assert summary.oracle_truth_steps == 0
     assert summary.perception_updates == 0
+    assert summary.final_error_m > 0.05
 
 
 def test_semantic_mock_detection_drives_without_truth_fallback(monkeypatch) -> None:
@@ -174,6 +175,36 @@ def test_semantic_viewer_mode_loads_backend_on_main_thread(monkeypatch) -> None:
     app = VisualServoSimulation(cfg)
     assert app.perception is not None
     assert app.detector_name == "semantic"
+
+
+def test_sync_viewer_perception_is_camera_fps_throttled(monkeypatch) -> None:
+    class FakeSemantic:
+        name = "semantic"
+
+        def detect(self, observation, truth_position, target, prompt):
+            return Detection(True, self.name, truth_position.copy(), score=1.0)
+
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
+    cfg = DemoConfig(target="apple", trajectory="static", detector="semantic", steps=1, headless=True, viewer=False, realtime=False, camera_fps=1.0)
+    app = VisualServoSimulation(cfg)
+    calls = 0
+
+    def render():
+        nonlocal calls
+        calls += 1
+        return None
+
+    monkeypatch.setattr(app, "_render_camera_observation", render)
+    assert app._update_perception(object(), np.array([0.4, 0.0, 0.3], dtype=float)) is not None
+    assert app._update_perception(object(), np.array([0.4, 0.0, 0.3], dtype=float)) is None
+    assert calls == 1
+
+
+def test_config_validation_rejects_bad_camera_size() -> None:
+    cfg = DemoConfig(camera=CameraConfig(width=16, height=320), headless=True, viewer=False)
+    with pytest.raises(ValueError, match="camera width"):
+        VisualServoSimulation(cfg)
 
 
 def test_default_detector_is_semantic() -> None:

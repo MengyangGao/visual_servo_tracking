@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
 from textwrap import dedent
 
 import mujoco
@@ -51,7 +52,7 @@ def _primitive_geom_xml(
     r, g, b, a = rgba_value
     rgba = f"{r:.3f} {g:.3f} {b:.3f} {a:.3f}"
     px, py, pz = pos
-    attrs = [f'name="{name}"', f'rgba="{rgba}"', f'pos="{px:.5f} {py:.5f} {pz:.5f}"']
+    attrs = [f'name="{_xml_attr(name)}"', f'rgba="{rgba}"', f'pos="{px:.5f} {py:.5f} {pz:.5f}"']
     if quat is not None:
         attrs.append('quat="' + " ".join(f"{v:.5f}" for v in quat) + '"')
     if shape == "sphere":
@@ -71,6 +72,7 @@ def _tracking_worldbody_xml(target: TargetSpec, camera: CameraConfig, target_pos
     x_axis, y_axis = look_at_xyaxes(camera_pos, camera_lookat)
     xyaxes = " ".join(f"{v:.6f}" for v in np.r_[x_axis, y_axis])
     target_geom = _target_geom_xml(target)
+    camera_name = _xml_attr(camera.name)
     return dedent(
         f"""
         <visual>
@@ -95,7 +97,7 @@ def _tracking_worldbody_xml(target: TargetSpec, camera: CameraConfig, target_pos
 
           <body name="camera_marker" pos="{camera_pos[0]:.5f} {camera_pos[1]:.5f} {camera_pos[2]:.5f}">
             <geom type="box" size="0.045 0.030 0.025" rgba="0.15 0.55 0.95 0.9" contype="0" conaffinity="0"/>
-            <camera name="{camera.name}" pos="0 0 0" xyaxes="{xyaxes}" fovy="{camera.fovy_deg:.3f}"/>
+            <camera name="{camera_name}" pos="0 0 0" xyaxes="{xyaxes}" fovy="{camera.fovy_deg:.3f}"/>
           </body>
 
           <body name="target" mocap="true" pos="{target_pos[0]:.5f} {target_pos[1]:.5f} {target_pos[2]:.5f}">
@@ -109,9 +111,15 @@ def _tracking_worldbody_xml(target: TargetSpec, camera: CameraConfig, target_pos
 
 def build_menagerie_mjcf(target: TargetSpec, camera: CameraConfig, robot: RobotSpec, target_pos: np.ndarray) -> str:
     text = robot.xml_path.read_text()
-    text = text.replace('meshdir="assets"', f'meshdir="{robot.asset_dir}"')
+    text = text.replace('meshdir="assets"', f'meshdir="{_xml_attr(str(robot.asset_dir))}"')
     insertion = "\n" + _tracking_worldbody_xml(target, camera, target_pos) + "\n"
+    if "</mujoco>" not in text:
+        raise RuntimeError(f"robot '{robot.name}' MJCF is missing a closing </mujoco> tag")
     return text.replace("</mujoco>", f"{insertion}</mujoco>", 1)
+
+
+def _xml_attr(value: str) -> str:
+    return escape(value, quote=True)
 
 
 def build_scene(
@@ -157,12 +165,12 @@ def build_scene(
 def _set_robot_actuator_ctrl(model: mujoco.MjModel, data: mujoco.MjData, robot: RobotSpec, qpos_command: np.ndarray) -> None:
     for i, joint_name in enumerate(robot.joint_names):
         actuator_id = _actuator_id_for_joint(model, robot, joint_name, i)
-        data.ctrl[actuator_id] = qpos_command[i]
+        _write_ctrl(model, data, actuator_id, qpos_command[i])
     for actuator_name, value in robot.passive_actuator_ctrl:
         actuator_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
         if actuator_id < 0:
             raise RuntimeError(f"robot '{robot.name}' passive actuator '{actuator_name}' not found")
-        data.ctrl[actuator_id] = float(value)
+        _write_ctrl(model, data, actuator_id, value)
 
 
 def _actuator_id_for_joint(model: mujoco.MjModel, robot: RobotSpec, joint_name: str, index: int) -> int:
@@ -175,6 +183,14 @@ def _actuator_id_for_joint(model: mujoco.MjModel, robot: RobotSpec, joint_name: 
         if int(model.actuator_trnid[actuator_id, 0]) == joint_id:
             return actuator_id
     raise RuntimeError(f"robot '{robot.name}' actuator for joint '{joint_name}' not found")
+
+
+def _write_ctrl(model: mujoco.MjModel, data: mujoco.MjData, actuator_id: int, value: float) -> None:
+    ctrl = float(value)
+    if model.actuator_ctrllimited[actuator_id]:
+        lo, hi = model.actuator_ctrlrange[actuator_id]
+        ctrl = float(np.clip(ctrl, lo, hi))
+    data.ctrl[actuator_id] = ctrl
 
 
 def set_target_position(model: mujoco.MjModel, data: mujoco.MjData, position: np.ndarray) -> None:

@@ -103,6 +103,8 @@ def load_target_specs(path: str | Path | None) -> dict[str, TargetSpec]:
     specs: dict[str, TargetSpec] = {}
     for entry in entries:
         spec = _target_from_mapping(entry)
+        if spec.name in specs:
+            raise ValueError(f"duplicate target name '{spec.name}'")
         specs[spec.name] = spec
     return specs
 
@@ -111,9 +113,9 @@ def _target_from_mapping(entry: Any) -> TargetSpec:
     if not isinstance(entry, dict):
         raise ValueError("target entries must be objects")
     name = _required_text(entry, "name")
-    shape = str(entry.get("shape", "box")).strip().lower()
-    size = _float_tuple(entry.get("size", (0.10, 0.10, 0.10)), 3, "size")
-    rgba = _float_tuple(entry.get("rgba", (0.85, 0.25, 0.25, 1.0)), 4, "rgba")
+    shape = _shape_value(entry.get("shape", "box"), "shape")
+    size = _positive_float_tuple(entry.get("size", (0.10, 0.10, 0.10)), 3, "size")
+    rgba = _rgba_tuple(entry.get("rgba", (0.85, 0.25, 0.25, 1.0)), "rgba")
     aliases = tuple(str(value).strip().lower() for value in entry.get("aliases", ()) if str(value).strip())
     base = entry.get("base_position")
     base_position = None if base is None else _float_tuple(base, 3, "base_position")
@@ -128,10 +130,10 @@ def _target_part_from_mapping(entry: Any) -> TargetPart:
     quat = entry.get("quat")
     pos_value = entry.get("pos", entry.get("offset", (0.0, 0.0, 0.0)))
     return TargetPart(
-        shape=str(entry.get("shape", "box")).strip().lower(),
-        size=_float_tuple(entry.get("size", (0.05, 0.05, 0.05)), 3, "part.size"),
+        shape=_shape_value(entry.get("shape", "box"), "part.shape"),
+        size=_positive_float_tuple(entry.get("size", (0.05, 0.05, 0.05)), 3, "part.size"),
         pos=_float_tuple(pos_value, 3, "part.pos"),
-        rgba=None if rgba is None else _float_tuple(rgba, 4, "part.rgba"),
+        rgba=None if rgba is None else _rgba_tuple(rgba, "part.rgba"),
         quat=None if quat is None else _float_tuple(quat, 4, "part.quat"),
     )
 
@@ -146,7 +148,31 @@ def _required_text(entry: dict[str, Any], key: str) -> str:
 def _float_tuple(value: Any, expected: int, field: str) -> tuple[float, ...]:
     if not isinstance(value, (list, tuple)) or len(value) != expected:
         raise ValueError(f"{field} must contain {expected} numbers")
-    return tuple(float(item) for item in value)
+    values = tuple(float(item) for item in value)
+    if not np.isfinite(values).all():
+        raise ValueError(f"{field} must contain finite numbers")
+    return values
+
+
+def _positive_float_tuple(value: Any, expected: int, field: str) -> tuple[float, ...]:
+    values = _float_tuple(value, expected, field)
+    if any(item <= 0.0 for item in values):
+        raise ValueError(f"{field} values must be positive")
+    return values
+
+
+def _rgba_tuple(value: Any, field: str) -> tuple[float, float, float, float]:
+    rgba = _float_tuple(value, 4, field)
+    if any(item < 0.0 or item > 1.0 for item in rgba):
+        raise ValueError(f"{field} values must be in [0, 1]")
+    return rgba
+
+
+def _shape_value(value: Any, field: str) -> str:
+    shape = str(value).strip().lower()
+    if shape not in {"box", "sphere", "cylinder", "capsule"}:
+        raise ValueError(f"{field} must be one of box, sphere, cylinder, capsule")
+    return shape
 
 
 def resolve_target(name_or_prompt: str, extra_targets: dict[str, TargetSpec] | None = None) -> TargetSpec:

@@ -9,8 +9,8 @@ import cv2
 import mujoco
 import numpy as np
 
-from .config import DemoConfig, resolve_robot
-from .control import ResolvedRateController, ServoState
+from .config import DemoConfig, resolve_robot, validate_config
+from .control import ResolvedRateController, ServoState, desired_ee_position
 from .depth import DepthBackend, build_depth_backend
 from .perception import CameraIntrinsics, CameraObservation, Detection, PerceptionBackend, build_perception
 from .scene import build_scene, frame_position, set_target_position, site_position
@@ -46,14 +46,15 @@ class RunSummary:
 
 class VisualServoSimulation:
     def __init__(self, config: DemoConfig) -> None:
+        validate_config(config)
         self.config = config
         self.robot = resolve_robot(config.robot)
         self.extra_targets = load_target_specs(config.target_file)
         self.target = resolve_target(config.target, self.extra_targets)
         self._target_base_position = (
-            np.array(self.robot.default_target_position, dtype=float).reshape(3)
-            if self.robot.default_target_position is not None
-            else base_position(self.target)
+            base_position(self.target)
+            if self.target.base_position is not None or self.robot.default_target_position is None
+            else np.array(self.robot.default_target_position, dtype=float).reshape(3)
         )
         self.scene = build_scene(self.target, config.camera, self.robot, target_position=self._target_base_position)
         self.motion = TargetMotion(self.target, config.trajectory, config.seed, base_override=self._target_base_position)
@@ -216,7 +217,8 @@ class VisualServoSimulation:
                 last_state = self.controller.hold(data, time_s, step)
             else:
                 last_state = self.controller.step(data, command_target, time_s, step, self._control_dt_s)
-            errors.append(last_state.position_error_m)
+            eval_desired = desired_ee_position(self.config.controller.task, target_pos, last_state.ee_position, self.config.controller)
+            errors.append(float(np.linalg.norm(eval_desired - last_state.ee_position)))
 
             for _ in range(self._substeps):
                 if self.config.manual_control and viewer is not None:
@@ -241,7 +243,7 @@ class VisualServoSimulation:
             final_error = float(np.linalg.norm(target - ee))
             errors = [final_error]
         else:
-            final_error = last_state.position_error_m
+            final_error = errors[-1]
         return RunSummary(
             steps=len(errors),
             robot=self.robot.name,
@@ -278,7 +280,8 @@ class VisualServoSimulation:
         if self.detector_name != "semantic" or self.perception is None:
             return
         if viewer is not None:
-            print("semantic models loaded on the main thread; inference will run asynchronously")
+            mode = "asynchronously" if self._uses_async_perception(viewer) else "on the main thread"
+            print(f"semantic models loaded; inference will run {mode}")
 
     def _ensure_perception(self) -> PerceptionBackend:
         if self.perception is None:
@@ -291,6 +294,8 @@ class VisualServoSimulation:
             return perception.detect(None, truth_position, self.target, self.config.target)
         if self._uses_async_perception(viewer):
             return self._update_async_perception(truth_position)
+        if viewer is not None and not self._should_sample_camera_now():
+            return None
         observation = self._render_camera_observation()
         observation = self._resolve_observation_depth(observation)
         detection = perception.detect(observation, truth_position, self.target, self.config.target)
@@ -320,8 +325,7 @@ class VisualServoSimulation:
         if self._perception_disabled:
             return self._last_detection
         now = time.perf_counter()
-        camera_period = 1.0 / max(0.5, float(self.config.camera_fps))
-        should_sample = self._perception_future is None and now - self._last_camera_wall_time >= camera_period
+        should_sample = self._perception_future is None and self._should_sample_camera_now(now)
         if should_sample:
             observation = self._render_camera_observation(resolve_learned_depth=False)
             self._last_camera_wall_time = now
@@ -333,6 +337,14 @@ class VisualServoSimulation:
                 truth = truth_position.copy()
                 self._perception_future = self._perception_executor.submit(self._detect_in_worker, observation, truth, target, prompt)
         return self._last_detection
+
+    def _should_sample_camera_now(self, now: float | None = None) -> bool:
+        now = time.perf_counter() if now is None else now
+        camera_period = 1.0 / max(0.5, float(self.config.camera_fps))
+        if now - self._last_camera_wall_time < camera_period:
+            return False
+        self._last_camera_wall_time = now
+        return True
 
     def _perception_age_s(self) -> float | None:
         if self._last_detection_wall_time is None:

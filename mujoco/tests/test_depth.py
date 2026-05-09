@@ -4,6 +4,7 @@ import sys
 import types
 
 import numpy as np
+import pytest
 
 from ._bootstrap import SRC  # noqa: F401
 
@@ -20,6 +21,14 @@ def test_mujoco_depth_backend_returns_metric_hint() -> None:
     assert estimate.backend == "mujoco"
     assert estimate.metric
     assert np.allclose(estimate.depth_m, 1.25)
+
+
+def test_mujoco_depth_backend_rejects_shape_mismatch() -> None:
+    backend = build_depth_backend(DepthConfig(backend="mujoco"))
+    image = np.zeros((8, 10, 3), dtype=np.uint8)
+    metric = np.full((7, 10), 1.25, dtype=np.float32)
+    with pytest.raises(ValueError, match="shape"):
+        backend.estimate(image, metric)
 
 
 def test_depth_anything_backend_can_be_mocked_and_metric_calibrated(monkeypatch) -> None:

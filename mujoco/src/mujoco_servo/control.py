@@ -109,9 +109,9 @@ class ResolvedRateController:
         current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
         self._qpos_command = current_qpos.copy()
         for i, actuator_id in enumerate(self._actuator_ids):
-            data.ctrl[actuator_id] = self._qpos_command[i]
+            self._write_ctrl(data, actuator_id, self._qpos_command[i])
         for actuator_id, value in self._passive_actuator_ids:
-            data.ctrl[actuator_id] = value
+            self._write_ctrl(data, actuator_id, value)
         return ServoState(
             step=step_index,
             time_s=time_s,
@@ -168,8 +168,12 @@ class ResolvedRateController:
         home_gain = 0.03 if desired_rotation is not None else 0.18
         qvel = qvel + home_gain * (nullspace @ home_error)
         qvel = clamp_norm(qvel, self.config.max_joint_speed)
+        if not np.isfinite(qvel).all():
+            qvel = np.zeros_like(qvel)
 
         dt_s = float(dt) if dt is not None else 1.0 / float(self.config.control_hz)
+        if not np.isfinite(dt_s) or dt_s <= 0.0:
+            raise ValueError("controller dt must be positive and finite")
         current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
         self._qpos_command = self._qpos_command + qvel * dt_s
         self._qpos_command = np.clip(self._qpos_command, current_qpos - 0.22, current_qpos + 0.22)
@@ -178,9 +182,9 @@ class ResolvedRateController:
                 lo, hi = self.model.jnt_range[joint_id]
                 self._qpos_command[i] = np.clip(self._qpos_command[i], lo + 1e-4, hi - 1e-4)
         for i, actuator_id in enumerate(self._actuator_ids):
-            data.ctrl[actuator_id] = self._qpos_command[i]
+            self._write_ctrl(data, actuator_id, self._qpos_command[i])
         for actuator_id, value in self._passive_actuator_ids:
-            data.ctrl[actuator_id] = value
+            self._write_ctrl(data, actuator_id, value)
 
         return ServoState(
             step=step_index,
@@ -215,3 +219,10 @@ class ResolvedRateController:
             if int(self.model.actuator_trnid[actuator_id, 0]) == joint_id:
                 return actuator_id
         raise RuntimeError(f"robot '{self.robot.name}' actuator for joint '{joint_name}' not found")
+
+    def _write_ctrl(self, data: mujoco.MjData, actuator_id: int, value: float) -> None:
+        ctrl = float(value)
+        if self.model.actuator_ctrllimited[actuator_id]:
+            lo, hi = self.model.actuator_ctrlrange[actuator_id]
+            ctrl = float(np.clip(ctrl, lo, hi))
+        data.ctrl[actuator_id] = ctrl

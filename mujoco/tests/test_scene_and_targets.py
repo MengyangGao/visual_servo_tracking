@@ -4,10 +4,13 @@ import json
 
 import numpy as np
 import mujoco
+import pytest
 
 from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.config import CameraConfig
+from mujoco_servo.app import VisualServoSimulation
+from mujoco_servo.config import DemoConfig
 from mujoco_servo.scene import build_scene, frame_position, site_position
 from mujoco_servo.targets import TargetMotion, base_position, load_target_specs, resolve_target
 
@@ -133,3 +136,71 @@ def test_custom_target_part_offset_alias_is_supported(tmp_path) -> None:
     target = resolve_target("offset-object", extra)
     assert target.parts
     assert np.allclose(target.parts[0].pos, [0.02, -0.01, 0.03], atol=1e-9)
+
+
+def test_custom_target_base_position_is_respected_by_runtime(tmp_path) -> None:
+    target_file = tmp_path / "targets.json"
+    target_file.write_text(
+        json.dumps(
+            {
+                "targets": [
+                    {
+                        "name": "far-custom",
+                        "shape": "box",
+                        "size": [0.04, 0.04, 0.04],
+                        "rgba": [0.2, 0.7, 0.2, 1.0],
+                        "base_position": [0.25, -0.20, 0.31],
+                    }
+                ]
+            }
+        )
+    )
+    app = VisualServoSimulation(
+        DemoConfig(
+            target="far-custom",
+            target_file=str(target_file),
+            detector="oracle",
+            trajectory="static",
+            steps=1,
+            headless=True,
+            viewer=False,
+            realtime=False,
+        )
+    )
+    assert np.allclose(app.motion.position(0.0), [0.25, -0.20, 0.31])
+
+
+def test_target_file_rejects_invalid_geometry(tmp_path) -> None:
+    target_file = tmp_path / "targets.json"
+    target_file.write_text(
+        json.dumps(
+            {
+                "targets": [
+                    {
+                        "name": "bad",
+                        "shape": "mesh",
+                        "size": [-0.04, 0.04, 0.04],
+                        "rgba": [1.2, 0.7, 0.2, 1.0],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="shape"):
+        load_target_specs(target_file)
+
+
+def test_target_file_rejects_duplicate_names(tmp_path) -> None:
+    target_file = tmp_path / "targets.json"
+    target_file.write_text(
+        json.dumps(
+            {
+                "targets": [
+                    {"name": "dup", "shape": "box"},
+                    {"name": "dup", "shape": "sphere"},
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        load_target_specs(target_file)

@@ -154,7 +154,9 @@ Robot/target swapping notes:
 
 - Each robot has its own default target workspace center so `oracle` control is reachable out-of-the-box (`panda`, `lite6`, `ur5e`).
 - `--target-file` custom targets take exact-name priority over built-in targets (example: `urbox` will not be mistaken for built-in `box`).
-- Custom target part entries accept both `pos` and `offset` keys.
+- Custom target part entries accept both `pos` and `offset` keys. Target files are validated for finite positive sizes, supported primitive shapes, RGBA range, duplicate names, and finite base positions.
+- Runtime summaries report task error against the simulated target for evaluation; non-oracle modes still never command from simulator truth.
+- Camera and depth inputs are shape-checked before 3D anchor estimation, and viewer perception is throttled by `--camera-fps` in both asynchronous and macOS main-thread modes.
 
 ### Validation
 
