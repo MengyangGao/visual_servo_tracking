@@ -104,9 +104,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         config = config_from_args(args)
+        summary = run_demo(config)
     except (ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(str(exc))
-    summary = run_demo(config)
     print(json.dumps(summary.as_dict(), indent=2, sort_keys=True))
     return 0
 

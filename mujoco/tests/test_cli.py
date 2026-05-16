@@ -7,6 +7,7 @@ import pytest
 from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.cli import build_parser, config_from_args
+from mujoco_servo import cli as cli_module
 
 
 def test_cli_config_rejects_invalid_camera_fps() -> None:
@@ -56,3 +57,16 @@ def test_cli_config_rejects_negative_standoff() -> None:
     args = parser.parse_args(["--headless", "--standoff-cm", "-1"])
     with pytest.raises(argparse.ArgumentTypeError, match="standoff-cm"):
         config_from_args(args)
+
+
+def test_cli_main_reports_runtime_config_errors_without_traceback(monkeypatch, capsys) -> None:
+    def fail_run(config):
+        raise ValueError("runtime config problem")
+
+    monkeypatch.setattr(cli_module, "run_demo", fail_run)
+    with pytest.raises(SystemExit) as exc:
+        cli_module.main(["--headless", "--detector", "oracle"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "runtime config problem" in captured.err
+    assert "Traceback" not in captured.err

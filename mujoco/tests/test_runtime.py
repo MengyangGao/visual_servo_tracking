@@ -40,7 +40,7 @@ def test_headless_demo_reduces_contact_error() -> None:
 
 def test_headless_circle_smoke() -> None:
     cfg = DemoConfig(
-        target="apple",
+        target="cup",
         trajectory="circle",
         detector="oracle",
         steps=120,
@@ -52,6 +52,38 @@ def test_headless_circle_smoke() -> None:
     summary = VisualServoSimulation(cfg).run()
     assert summary.steps == 120
     assert summary.final_error_m < summary.max_error_m
+
+
+def test_contact_task_rejects_target_too_wide_for_panda_gripper() -> None:
+    cfg = DemoConfig(
+        robot="panda",
+        target="sphere",
+        trajectory="static",
+        detector="oracle",
+        steps=1,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        controller=ControllerConfig(task="contact", control_hz=120.0),
+    )
+    with pytest.raises(ValueError, match="gripper width"):
+        VisualServoSimulation(cfg)
+
+
+def test_standoff_task_accepts_target_too_wide_for_panda_gripper() -> None:
+    cfg = DemoConfig(
+        robot="panda",
+        target="sphere",
+        trajectory="static",
+        detector="oracle",
+        steps=1,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        controller=ControllerConfig(task="front-standoff", standoff_m=0.12, control_hz=120.0),
+    )
+    summary = VisualServoSimulation(cfg).run()
+    assert summary.steps == 1
 
 
 def test_front_standoff_tracks_requested_distance() -> None:
@@ -118,6 +150,23 @@ def test_semantic_mock_detection_drives_without_truth_fallback(monkeypatch) -> N
     assert summary.rejected_detections == 0
     assert summary.truth_fallback_steps == 0
     assert summary.oracle_truth_steps == 0
+
+
+def test_color_detector_drives_moving_visible_target() -> None:
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="circle",
+        detector="color",
+        steps=12,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        controller=ControllerConfig(task="contact", control_hz=120.0),
+    )
+    summary = VisualServoSimulation(cfg).run()
+    assert summary.perception_updates > 0
+    assert summary.hold_steps == 0
+    assert summary.truth_fallback_steps == 0
 
 
 def test_implausible_detection_is_rejected(monkeypatch) -> None:
@@ -189,6 +238,30 @@ def test_alternate_robot_headless_smoke() -> None:
     assert summary.steps == 20
 
 
+def test_oracle_moving_target_moves_each_robot() -> None:
+    for robot in ("panda", "ur5e", "lite6"):
+        cfg = DemoConfig(
+            robot=robot,
+            target="cup",
+            trajectory="circle",
+            detector="oracle",
+            steps=90,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            controller=ControllerConfig(task="contact", control_hz=120.0),
+        )
+        app = VisualServoSimulation(cfg)
+        start_qpos = np.array(app.scene.data.qpos[:], dtype=float)
+        start_ee = frame_position(app.scene.model, app.scene.data, app.scene.ee_frame_type, app.scene.ee_frame_name, app.scene.ee_frame_offset)
+        summary = app.run()
+        end_qpos = np.array(app.scene.data.qpos[:], dtype=float)
+        end_ee = frame_position(app.scene.model, app.scene.data, app.scene.ee_frame_type, app.scene.ee_frame_name, app.scene.ee_frame_offset)
+        assert summary.steps == 90
+        assert np.linalg.norm(end_qpos - start_qpos) > 1e-3
+        assert np.linalg.norm(end_ee - start_ee) > 1e-3
+
+
 def test_semantic_viewer_mode_loads_backend_on_main_thread(monkeypatch) -> None:
     class FakeSemantic:
         name = "semantic"
@@ -197,7 +270,7 @@ def test_semantic_viewer_mode_loads_backend_on_main_thread(monkeypatch) -> None:
             return Detection(False, self.name, None)
 
     monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
-    cfg = DemoConfig(target="apple", trajectory="static", detector="semantic", steps=1, headless=False, viewer=True, realtime=False)
+    cfg = DemoConfig(target="cup", trajectory="static", detector="semantic", steps=1, headless=False, viewer=True, realtime=False)
     app = VisualServoSimulation(cfg)
     assert app.perception is not None
     assert app.detector_name == "semantic"
@@ -212,7 +285,7 @@ def test_sync_viewer_perception_is_camera_fps_throttled(monkeypatch) -> None:
 
     monkeypatch.setattr(app_module.sys, "platform", "darwin")
     monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
-    cfg = DemoConfig(target="apple", trajectory="static", detector="semantic", steps=1, headless=True, viewer=False, realtime=False, camera_fps=1.0)
+    cfg = DemoConfig(target="cup", trajectory="static", detector="semantic", steps=1, headless=True, viewer=False, realtime=False, camera_fps=1.0)
     app = VisualServoSimulation(cfg)
     calls = 0
 

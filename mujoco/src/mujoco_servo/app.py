@@ -51,6 +51,7 @@ class VisualServoSimulation:
         self.robot = resolve_robot(config.robot)
         self.extra_targets = load_target_specs(config.target_file)
         self.target = resolve_target(config.target, self.extra_targets)
+        self._validate_task_target_compatibility()
         self._target_base_position = (
             base_position(self.target)
             if self.target.base_position is not None or self.robot.default_target_position is None
@@ -92,6 +93,18 @@ class VisualServoSimulation:
         self._control_dt_s = self._substeps * float(self.scene.model.opt.timestep)
         self._camera_render_times_ms: list[float] = []
         self._last_depth_metric = False
+
+    def _validate_task_target_compatibility(self) -> None:
+        task = self.config.controller.task.strip().lower()
+        if task != "contact" or self.robot.max_gripper_width_m is None:
+            return
+        grasp_width = float(self.target.grasp_width_m)
+        max_width = float(self.robot.max_gripper_width_m)
+        if grasp_width > max_width + 1e-9:
+            raise ValueError(
+                f"target '{self.target.name}' grasp width {grasp_width:.3f} m exceeds "
+                f"robot '{self.robot.name}' gripper width {max_width:.3f} m; use standoff or front-standoff"
+            )
 
     def run(self) -> RunSummary:
         viewer = None

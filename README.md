@@ -153,6 +153,7 @@ Target offsets are keyboard-controlled.
 Robot/target swapping notes:
 
 - Each robot has its own default target workspace center so `oracle` control is reachable out-of-the-box (`panda`, `lite6`, `ur5e`).
+- For Panda, `contact` is allowed only when the target's grasp-relevant width fits the modeled 8 cm gripper opening. Wider targets such as `sphere`, `apple`, or `box` should use `standoff` or `front-standoff`.
 - `--target-file` custom targets take exact-name priority over built-in targets (example: `urbox` will not be mistaken for built-in `box`).
 - Custom target part entries accept both `pos` and `offset` keys. Target files are validated for finite positive sizes, supported primitive shapes, RGBA range, duplicate names, and finite base positions.
 - Runtime summaries report task error against the simulated target for evaluation; non-oracle modes still never command from simulator truth.

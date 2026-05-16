@@ -4,6 +4,7 @@ Implement the MuJoCo review findings so the simulator moves toward smooth, gener
 Extend that implementation so semantic perception is the primary path, depth is modeled as an explicit backend, and the user-facing commands document what each mode does.
 Complete final acceptance for detector modes, robot/target swapping, and stability regressions; then deliver a clean checkpoint commit.
 Review the full project-owned MuJoCo implementation again, identify ten major correctness/robustness issues, fix them, add targeted tests, and commit the fixes.
+Audit detector/runtime behavior with the actual MuJoCo GUI for oracle, color, and semantic modes, then fix any issues in IK/FK, robot motion planning, target/robot switching, and contact-vs-standoff task selection.
 
 # User Value
 
@@ -32,6 +33,8 @@ Review the full project-owned MuJoCo implementation again, identify ten major co
 - [ASSUMPTION] In non-oracle perception modes, holding the last observation or holding the end-effector position is preferable to using truth while detection is pending.
 - [ASSUMPTION] Depth Anything V2 via Hugging Face Transformers is the right optional monocular depth backend because the project already uses Transformers for semantic perception.
 - [ASSUMPTION] MuJoCo rendered depth remains the best default in simulation because it is metric, fast, deterministic, and testable.
+- [ASSUMPTION] "目标小球动、机械臂不动" is unacceptable for oracle/color when the target is visible/reachable; for semantic it is acceptable only while model loading or detection is genuinely pending, and the run must report that hold state clearly.
+- [ASSUMPTION] Contact tasks should be allowed only when the target's grasp-relevant width fits the selected robot's gripper opening; larger or ungraspable robot/target combinations should fail early and direct the user to standoff/front-standoff.
 
 # Affected Files
 
@@ -77,6 +80,10 @@ Review the full project-owned MuJoCo implementation again, identify ten major co
     - Scene target positioning accepts non-finite coordinates that can poison MuJoCo state.
     - Zero-step runs report one completed step because final-error fallback is counted as loop output.
 19. Add regression tests for each issue class above.
+20. Run GUI smoke checks with `mjpython` for oracle, color, and semantic paths, including at least one moving target where the arm must visibly command motion.
+21. Audit FK/IK consistency by comparing resolved end-effector frame motion, qpos commands, and summary errors across Panda, UR5e, and Lite6 headless runs.
+22. Audit target switching across small and oversized targets; enforce contact-vs-standoff constraints from robot gripper reach where applicable.
+23. Add tests for detector liveness, robot switching, target task compatibility, and summary diagnostics that explain hold/no-motion states.
 
 # Overlooked Risks / Edge Cases
 
@@ -86,6 +93,9 @@ Review the full project-owned MuJoCo implementation again, identify ten major co
 4. Bad CLI numeric values (`--camera-fps 0`, negative standoff, tiny render sizes) can pass argparse and fail later in less actionable ways.
 5. Perception/depth arrays from model backends may have unexpected shape or scale and silently produce wrong 3D servo targets.
 6. Runtime summaries can report "good" final errors even when the commanded target is stale, held, or rejected for most of the run.
+7. Semantic GUI smoke can be blocked by optional model downloads or missing weights; if that happens, record the exact failure and use mocked semantic tests for deterministic coverage.
+8. Contact feasibility depends on how a target should be grasped; using only the largest bounding-box dimension can be overly conservative for elongated objects, while using only the smallest dimension can be unsafe.
+9. Robots without modeled grippers need explicit task compatibility semantics; otherwise "contact" can mean tool-point contact rather than a grasp.
 
 # Validation
 

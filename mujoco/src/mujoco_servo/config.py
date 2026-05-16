@@ -36,6 +36,10 @@ class TargetSpec:
     def radius(self) -> float:
         return 0.5 * max(self.size)
 
+    @property
+    def grasp_width_m(self) -> float:
+        return float(min(self.size[0], self.size[1]))
+
 
 @dataclass(frozen=True)
 class TargetPart:
@@ -81,6 +85,7 @@ class RobotSpec:
     ee_frame_type: str
     ee_frame_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     passive_actuator_ctrl: tuple[tuple[str, float], ...] = ()
+    max_gripper_width_m: float | None = None
     default_target_position: tuple[float, float, float] | None = None
     detection_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
     aliases: tuple[str, ...] = ()
@@ -102,6 +107,7 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         ee_frame_type="body_point",
         ee_frame_offset=(0.0, 0.0, 0.10),
         passive_actuator_ctrl=(("actuator8", 255.0),),
+        max_gripper_width_m=0.08,
         default_target_position=(0.44, 0.13, 0.33),
         detection_bounds=((0.05, -0.55, 0.05), (0.85, 0.55, 0.85)),
         aliases=("franka", "franka-panda", "franka_emika_panda"),
