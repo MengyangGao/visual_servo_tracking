@@ -65,6 +65,18 @@ Review the full project-owned MuJoCo implementation again, identify ten major co
 15. Audit project-owned MuJoCo code for ten major remaining issues across CLI, config validation, scene loading, perception, depth, servo control, and runtime summaries.
 16. Implement focused fixes with regression tests for each issue class.
 17. Re-run the full MuJoCo test suite plus representative detector/robot smoke commands, then create a local commit.
+18. Fix the current audit's ten concrete defects:
+    - CLI silently clamps valid/invalid `--camera-fps` instead of preserving or rejecting the user's value.
+    - CLI silently clamps `--overlay-width-frac`, masking invalid values and preventing valid large overlays.
+    - CLI accepts non-finite numeric values such as `nan` and `inf` for runtime options.
+    - Depth config validation accepts unknown backends and devices until much later in runtime.
+    - Target files allow duplicate names/aliases that make prompts resolve ambiguously.
+    - Perception bbox handling can crash on NaN, infinite, or inverted model boxes.
+    - Observation validation allows non-finite camera intrinsics, camera pose, and frame values.
+    - Runtime detection acceptance can crash on malformed detector positions instead of rejecting them.
+    - Scene target positioning accepts non-finite coordinates that can poison MuJoCo state.
+    - Zero-step runs report one completed step because final-error fallback is counted as loop output.
+19. Add regression tests for each issue class above.
 
 # Overlooked Risks / Edge Cases
 

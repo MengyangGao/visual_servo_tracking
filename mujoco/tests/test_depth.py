@@ -31,6 +31,14 @@ def test_mujoco_depth_backend_rejects_shape_mismatch() -> None:
         backend.estimate(image, metric)
 
 
+def test_depth_backend_rejects_nonfinite_float_frame() -> None:
+    backend = build_depth_backend(DepthConfig(backend="none"))
+    image = np.zeros((8, 10, 3), dtype=np.float32)
+    image[0, 0, 0] = np.nan
+    with pytest.raises(ValueError, match="frame_bgr"):
+        backend.estimate(image)
+
+
 def test_depth_anything_backend_can_be_mocked_and_metric_calibrated(monkeypatch) -> None:
     class FakeMps:
         @staticmethod

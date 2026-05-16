@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 
 from .app import run_demo
 from .config import CameraConfig, ControllerConfig, DemoConfig, DepthConfig, available_depth_backends, available_robots, available_tasks, available_trajectories, validate_config
@@ -44,14 +45,16 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         raise argparse.ArgumentTypeError("--steps must be non-negative")
     if args.camera_width < 32 or args.camera_height < 32:
         raise argparse.ArgumentTypeError("--camera-width and --camera-height must be at least 32")
-    if args.camera_fps <= 0.0:
+    if not _is_finite(args.camera_fps) or args.camera_fps <= 0.0:
         raise argparse.ArgumentTypeError("--camera-fps must be positive")
-    if args.key_speed_cm_s < 0.0:
+    if not _is_finite(args.key_speed_cm_s) or args.key_speed_cm_s < 0.0:
         raise argparse.ArgumentTypeError("--key-speed-cm-s must be non-negative")
-    if args.standoff is not None and args.standoff < 0.0:
+    if args.standoff is not None and (not _is_finite(args.standoff) or args.standoff < 0.0):
         raise argparse.ArgumentTypeError("--standoff must be non-negative")
-    if args.standoff_cm < 0.0:
+    if not _is_finite(args.standoff_cm) or args.standoff_cm < 0.0:
         raise argparse.ArgumentTypeError("--standoff-cm must be non-negative")
+    if not _is_finite(args.overlay_width_frac) or not 0.05 <= float(args.overlay_width_frac) <= 0.95:
+        raise argparse.ArgumentTypeError("--overlay-width-frac must be in [0.05, 0.95]")
     camera = CameraConfig(width=args.camera_width, height=args.camera_height)
     standoff_m = float(args.standoff) if args.standoff is not None else float(args.standoff_cm) / 100.0
     controller = ControllerConfig(task=args.task, standoff_m=standoff_m)
@@ -75,8 +78,8 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         key_speed_mps=float(args.key_speed_cm_s) / 100.0,
         camera_overlay=not args.no_camera_overlay,
         debug_perception=bool(args.debug_perception),
-        camera_fps=max(0.5, float(args.camera_fps)),
-        overlay_width_fraction=min(0.75, max(0.15, float(args.overlay_width_frac))),
+        camera_fps=float(args.camera_fps),
+        overlay_width_fraction=float(args.overlay_width_frac),
         seed=args.seed,
         camera=camera,
         depth=depth,
@@ -84,6 +87,13 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
     )
     validate_config(config)
     return config
+
+
+def _is_finite(value: float) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -11,7 +11,7 @@ from ._bootstrap import SRC  # noqa: F401
 from mujoco_servo.config import CameraConfig
 from mujoco_servo.app import VisualServoSimulation
 from mujoco_servo.config import DemoConfig
-from mujoco_servo.scene import build_scene, frame_position, site_position
+from mujoco_servo.scene import build_scene, frame_position, set_target_position, site_position
 from mujoco_servo.targets import TargetMotion, base_position, load_target_specs, resolve_target
 
 
@@ -204,3 +204,25 @@ def test_target_file_rejects_duplicate_names(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="duplicate"):
         load_target_specs(target_file)
+
+
+def test_target_file_rejects_duplicate_aliases(tmp_path) -> None:
+    target_file = tmp_path / "targets.json"
+    target_file.write_text(
+        json.dumps(
+            {
+                "targets": [
+                    {"name": "first", "shape": "box", "aliases": ["shared object"]},
+                    {"name": "second", "shape": "sphere", "aliases": ["shared object"]},
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="duplicate target name or alias"):
+        load_target_specs(target_file)
+
+
+def test_set_target_position_rejects_nonfinite_values() -> None:
+    scene = build_scene(resolve_target("cup"), CameraConfig())
+    with pytest.raises(ValueError, match="target position"):
+        set_target_position(scene.model, scene.data, np.array([0.4, np.nan, 0.3]))

@@ -237,25 +237,29 @@ class VisualServoSimulation:
                 if remaining > 0:
                     time.sleep(min(remaining, 0.02))
 
+        completed_steps = len(errors)
+        metric_errors = errors
+        fallback_target_distance = 0.0
         if last_state is None:
             ee = frame_position(model, data, self.scene.ee_frame_type, self.scene.ee_frame_name, self.scene.ee_frame_offset)
             target = site_position(model, data, self.scene.target_site_name)
             final_error = float(np.linalg.norm(target - ee))
-            errors = [final_error]
+            fallback_target_distance = final_error
+            metric_errors = [final_error]
         else:
             final_error = errors[-1]
         return RunSummary(
-            steps=len(errors),
+            steps=completed_steps,
             robot=self.robot.name,
             task=self.config.controller.task,
             target=self.target.name,
             trajectory=self.config.trajectory,
             detector=self.detector_name,
             final_error_m=float(final_error),
-            final_target_distance_m=float(last_state.target_distance_m if last_state is not None else errors[-1]),
-            mean_error_m=float(np.mean(errors)),
-            min_error_m=float(np.min(errors)),
-            max_error_m=float(np.max(errors)),
+            final_target_distance_m=float(last_state.target_distance_m if last_state is not None else fallback_target_distance),
+            mean_error_m=float(np.mean(metric_errors)),
+            min_error_m=float(np.min(metric_errors)),
+            max_error_m=float(np.max(metric_errors)),
             perception_updates=perception_updates,
             rejected_detections=rejected_detections,
             hold_steps=hold_steps,
@@ -354,7 +358,10 @@ class VisualServoSimulation:
     def _accept_detection(self, detection: Detection) -> bool:
         if detection.target_position is None:
             return False
-        position = np.asarray(detection.target_position, dtype=float).reshape(3)
+        try:
+            position = np.asarray(detection.target_position, dtype=float).reshape(3)
+        except (TypeError, ValueError):
+            return False
         if not np.isfinite(position).all():
             return False
         if self.robot.detection_bounds is None:
@@ -382,8 +389,11 @@ class VisualServoSimulation:
         if not self.config.debug_perception:
             return
         err = None
-        if detection.target_position is not None:
-            err = float(np.linalg.norm(detection.target_position - truth_position))
+        try:
+            if detection.target_position is not None:
+                err = float(np.linalg.norm(np.asarray(detection.target_position, dtype=float).reshape(3) - truth_position))
+        except (TypeError, ValueError):
+            err = None
         depth_backend = observation.depth_backend if observation is not None else "none"
         mask_area = None if detection.mask is None else int((detection.mask > 0).sum())
         print(
@@ -489,11 +499,14 @@ class VisualServoSimulation:
             color[:, :, 1] = 180
             image[mask] = cv2.addWeighted(image[mask], 0.55, color[mask], 0.45, 0)
         if detection is not None and detection.bbox_xyxy is not None:
-            x1, y1, x2, y2 = detection.bbox_xyxy.astype(int)
-            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            bbox = self._overlay_bbox(detection.bbox_xyxy, image.shape)
+            if bbox is not None:
+                x1, y1, x2, y2 = bbox
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 255), 2)
         if detection is not None and detection.centroid_px is not None:
-            center = tuple(detection.centroid_px.astype(int))
-            cv2.drawMarker(image, center, (255, 255, 255), cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
+            center = self._overlay_point(detection.centroid_px, image.shape)
+            if center is not None:
+                cv2.drawMarker(image, center, (255, 255, 255), cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
         label = f"{self.detector_name} pending" if pending else f"{self.detector_name}"
         if detection is not None:
             label = f"{detection.backend} score={detection.score:.2f}"
@@ -507,6 +520,39 @@ class VisualServoSimulation:
         cv2.putText(image, label, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(image, self.config.target, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
         return image
+
+    @staticmethod
+    def _overlay_bbox(bbox_xyxy: np.ndarray, image_shape: tuple[int, int, int]) -> tuple[int, int, int, int] | None:
+        try:
+            bbox = np.asarray(bbox_xyxy, dtype=float).reshape(4)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(bbox).all():
+            return None
+        h, w = image_shape[:2]
+        x1, y1, x2, y2 = bbox
+        if x2 <= x1 or y2 <= y1:
+            return None
+        left = max(0, min(w - 1, int(np.floor(x1))))
+        top = max(0, min(h - 1, int(np.floor(y1))))
+        right = max(0, min(w - 1, int(np.ceil(x2))))
+        bottom = max(0, min(h - 1, int(np.ceil(y2))))
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
+
+    @staticmethod
+    def _overlay_point(point_xy: np.ndarray, image_shape: tuple[int, int, int]) -> tuple[int, int] | None:
+        try:
+            point = np.asarray(point_xy, dtype=float).reshape(2)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(point).all():
+            return None
+        h, w = image_shape[:2]
+        x = max(0, min(w - 1, int(round(point[0]))))
+        y = max(0, min(h - 1, int(round(point[1]))))
+        return x, y
 
     def _update_viewer_overlay(self, viewer) -> None:
         if not self.config.camera_overlay or self._latest_overlay_bgr is None:

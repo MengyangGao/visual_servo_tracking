@@ -9,7 +9,7 @@ from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo import app as app_module
 from mujoco_servo.app import VisualServoSimulation
-from mujoco_servo.config import CameraConfig, ControllerConfig, DemoConfig
+from mujoco_servo.config import CameraConfig, ControllerConfig, DemoConfig, DepthConfig
 from mujoco_servo.perception import Detection
 from mujoco_servo.scene import frame_position
 
@@ -146,6 +146,32 @@ def test_implausible_detection_is_rejected(monkeypatch) -> None:
     assert summary.hold_steps == 4
 
 
+def test_malformed_detection_position_is_rejected(monkeypatch) -> None:
+    class FakeSemantic:
+        name = "semantic"
+
+        def detect(self, observation, truth_position, target, prompt):
+            return Detection(True, "semantic-test", np.array([0.4, 0.2]), score=0.9)
+
+    monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="static",
+        detector="semantic",
+        steps=3,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        controller=ControllerConfig(task="contact", control_hz=120.0),
+    )
+    app = VisualServoSimulation(cfg)
+    monkeypatch.setattr(app, "_render_camera_observation", lambda: None)
+    summary = app.run()
+    assert summary.perception_updates == 0
+    assert summary.rejected_detections == 3
+    assert summary.hold_steps == 3
+
+
 def test_alternate_robot_headless_smoke() -> None:
     cfg = DemoConfig(
         robot="ur5e",
@@ -205,6 +231,33 @@ def test_config_validation_rejects_bad_camera_size() -> None:
     cfg = DemoConfig(camera=CameraConfig(width=16, height=320), headless=True, viewer=False)
     with pytest.raises(ValueError, match="camera width"):
         VisualServoSimulation(cfg)
+
+
+def test_config_validation_rejects_unknown_depth_backend() -> None:
+    cfg = DemoConfig(depth=DepthConfig(backend="made-up"), headless=True, viewer=False)
+    with pytest.raises(ValueError, match="depth backend"):
+        VisualServoSimulation(cfg)
+
+
+def test_config_validation_rejects_unknown_depth_device() -> None:
+    cfg = DemoConfig(depth=DepthConfig(device="gpu"), headless=True, viewer=False)
+    with pytest.raises(ValueError, match="depth device"):
+        VisualServoSimulation(cfg)
+
+
+def test_zero_step_run_reports_zero_completed_steps() -> None:
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="static",
+        detector="oracle",
+        steps=0,
+        headless=True,
+        viewer=False,
+        realtime=False,
+    )
+    summary = VisualServoSimulation(cfg).run()
+    assert summary.steps == 0
+    assert np.isfinite(summary.final_error_m)
 
 
 def test_default_detector_is_semantic() -> None:

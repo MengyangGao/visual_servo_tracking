@@ -55,8 +55,13 @@ class PerceptionBackend(Protocol):
 
 def _bbox_mask(frame_shape: tuple[int, int, int], bbox_xyxy: np.ndarray) -> np.ndarray:
     h, w = frame_shape[:2]
-    x1, y1, x2, y2 = np.asarray(bbox_xyxy, dtype=float).reshape(4)
     mask = np.zeros((h, w), dtype=np.uint8)
+    bbox = _valid_bbox(bbox_xyxy)
+    if bbox is None:
+        return mask
+    x1, y1, x2, y2 = bbox
+    if x2 <= 0.0 or y2 <= 0.0 or x1 >= w or y1 >= h:
+        return mask
     left = max(0, min(w - 1, int(np.floor(x1))))
     top = max(0, min(h - 1, int(np.floor(y1))))
     right = max(left + 1, min(w, int(np.ceil(x2))))
@@ -71,17 +76,23 @@ def _estimate_world_position(
     mask: np.ndarray | None,
 ) -> tuple[np.ndarray | None, np.ndarray, np.ndarray | None, np.ndarray | None, str]:
     _validate_observation(observation)
+    bbox = _valid_bbox(bbox_xyxy)
     if mask is None:
         mask = _bbox_mask(observation.frame_bgr.shape, bbox_xyxy)
     elif mask.shape != observation.frame_bgr.shape[:2]:
         raise ValueError("mask shape must match observation frame shape")
+    if bbox is None:
+        return None, mask, None, None, "invalid_bbox"
+    h, w = observation.frame_bgr.shape[:2]
+    x1, y1, x2, y2 = bbox
+    if x2 <= 0.0 or y2 <= 0.0 or x1 >= w or y1 >= h:
+        return None, mask, None, None, "invalid_bbox"
     valid = mask > 0
     depth = np.asarray(observation.depth_m, dtype=float)
     valid &= np.isfinite(depth)
     valid &= depth > 0.0
     valid = _trim_depth_outliers(depth, valid)
     if not np.any(valid):
-        x1, y1, x2, y2 = np.asarray(bbox_xyxy, dtype=float).reshape(4)
         u = 0.5 * (x1 + x2)
         v = 0.5 * (y1 + y2)
         sample = depth[max(0, min(depth.shape[0] - 1, int(v))), max(0, min(depth.shape[1] - 1, int(u)))]
@@ -401,7 +412,10 @@ class SemanticPerception:
     @staticmethod
     def _expanded_bbox(frame_shape: tuple[int, int, int], bbox: np.ndarray, scale: float) -> tuple[int, int, int, int]:
         h, w = frame_shape[:2]
-        x1, y1, x2, y2 = np.asarray(bbox, dtype=float).reshape(4)
+        valid_bbox = _valid_bbox(bbox)
+        if valid_bbox is None:
+            return 0, 0, w, h
+        x1, y1, x2, y2 = valid_bbox
         cx = 0.5 * (x1 + x2)
         cy = 0.5 * (y1 + y2)
         half_w = max(8.0, 0.5 * (x2 - x1) * (1.0 + scale))
@@ -468,20 +482,43 @@ def _hue_range_mask(hsv: np.ndarray, hue: int, tolerance: int, min_sat: int, min
     return cv2.inRange(hsv, np.array([low_h, sat, val], dtype=np.uint8), np.array([high_h, 255, 255], dtype=np.uint8))
 
 
+def _valid_bbox(bbox_xyxy: np.ndarray) -> np.ndarray | None:
+    try:
+        bbox = np.asarray(bbox_xyxy, dtype=float).reshape(4)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(bbox).all():
+        return None
+    x1, y1, x2, y2 = bbox
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return bbox
+
+
 def _validate_observation(observation: CameraObservation) -> None:
     frame = np.asarray(observation.frame_bgr)
     depth = np.asarray(observation.depth_m)
     if frame.ndim != 3 or frame.shape[2] != 3:
         raise ValueError("observation frame_bgr must have shape (height, width, 3)")
+    if np.issubdtype(frame.dtype, np.floating) and not np.isfinite(frame).all():
+        raise ValueError("observation frame_bgr must contain finite values")
     if depth.shape != frame.shape[:2]:
         raise ValueError("observation depth_m shape must match frame height/width")
     if observation.intrinsics.width != frame.shape[1] or observation.intrinsics.height != frame.shape[0]:
         raise ValueError("observation intrinsics size must match frame shape")
+    intrinsic_values = np.array(
+        [observation.intrinsics.fx, observation.intrinsics.fy, observation.intrinsics.cx, observation.intrinsics.cy],
+        dtype=float,
+    )
+    if not np.isfinite(intrinsic_values).all():
+        raise ValueError("observation intrinsics must contain finite values")
     if observation.intrinsics.fx <= 0.0 or observation.intrinsics.fy <= 0.0:
         raise ValueError("observation focal lengths must be positive")
     if np.isinf(depth).any():
         raise ValueError("observation depth_m must not contain infinite values")
-    if np.asarray(observation.camera_position).shape != (3,):
+    camera_position = np.asarray(observation.camera_position, dtype=float)
+    if camera_position.shape != (3,) or not np.isfinite(camera_position).all():
         raise ValueError("observation camera_position must have shape (3,)")
-    if np.asarray(observation.camera_xmat).shape != (3, 3):
+    camera_xmat = np.asarray(observation.camera_xmat, dtype=float)
+    if camera_xmat.shape != (3, 3) or not np.isfinite(camera_xmat).all():
         raise ValueError("observation camera_xmat must have shape (3, 3)")

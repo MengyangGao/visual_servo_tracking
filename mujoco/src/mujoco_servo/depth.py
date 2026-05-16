@@ -111,6 +111,8 @@ def _validate_frame(frame_bgr: np.ndarray) -> None:
     frame = np.asarray(frame_bgr)
     if frame.ndim != 3 or frame.shape[2] != 3 or frame.shape[0] <= 0 or frame.shape[1] <= 0:
         raise ValueError("frame_bgr must have shape (height, width, 3)")
+    if np.issubdtype(frame.dtype, np.floating) and not np.isfinite(frame).all():
+        raise ValueError("frame_bgr must contain finite values")
 
 
 def _validate_depth(depth_m: np.ndarray, expected_shape: tuple[int, int], name: str) -> np.ndarray:

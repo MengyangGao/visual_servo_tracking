@@ -131,6 +131,8 @@ def build_scene(
     cam = camera or CameraConfig()
     robot_spec = resolve_robot(robot) if isinstance(robot, str) else robot
     target_pos = np.asarray(base_position(target) if target_position is None else target_position, dtype=float).reshape(3)
+    if not np.isfinite(target_pos).all():
+        raise ValueError("target_position must contain three finite values")
     if not robot_spec.xml_path.exists() or not robot_spec.asset_dir.exists():
         raise FileNotFoundError(
             f"MuJoCo Menagerie assets for robot '{robot_spec.name}' are required. Run "
@@ -139,6 +141,8 @@ def build_scene(
     source = "menagerie"
     model = mujoco.MjModel.from_xml_string(build_menagerie_mjcf(target, cam, robot_spec, target_pos))
     home = np.array(robot_spec.home_qpos, dtype=float)
+    if home.shape != (len(robot_spec.joint_names),) or not np.isfinite(home).all():
+        raise RuntimeError(f"robot '{robot_spec.name}' home_qpos must have {len(robot_spec.joint_names)} finite values")
     data = mujoco.MjData(model)
     mujoco.mj_resetDataKeyframe(model, data, 0)
     joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in robot_spec.joint_names]
@@ -194,13 +198,16 @@ def _write_ctrl(model: mujoco.MjModel, data: mujoco.MjData, actuator_id: int, va
 
 
 def set_target_position(model: mujoco.MjModel, data: mujoco.MjData, position: np.ndarray) -> None:
+    target_position = np.asarray(position, dtype=float).reshape(3)
+    if not np.isfinite(target_position).all():
+        raise ValueError("target position must contain three finite values")
     body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "target")
     if body_id < 0:
         raise KeyError("target body missing")
     mocap_id = int(model.body_mocapid[body_id])
     if mocap_id < 0:
         raise RuntimeError("target body is not mocap-controlled")
-    data.mocap_pos[mocap_id] = np.asarray(position, dtype=float).reshape(3)
+    data.mocap_pos[mocap_id] = target_position
 
 
 def site_position(model: mujoco.MjModel, data: mujoco.MjData, site_name: str) -> np.ndarray:

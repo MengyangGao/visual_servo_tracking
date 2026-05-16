@@ -219,10 +219,16 @@ def _validate_camera_config(config: CameraConfig) -> None:
 
 
 def _validate_depth_config(config: DepthConfig) -> None:
-    if not config.backend.strip():
+    backend = config.backend.strip().lower()
+    if not backend:
         raise ValueError("depth backend must be non-empty")
+    if backend not in available_depth_backends():
+        raise ValueError(f"depth backend must be one of {', '.join(available_depth_backends())}")
     if not config.model.strip():
         raise ValueError("depth model must be non-empty")
+    device = config.device.strip().lower()
+    if device not in {"auto", "cpu", "mps", "cuda"}:
+        raise ValueError("depth device must be one of auto, cpu, mps, cuda")
 
 
 def project_root() -> Path:

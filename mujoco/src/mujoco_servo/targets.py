@@ -101,10 +101,12 @@ def load_target_specs(path: str | Path | None) -> dict[str, TargetSpec]:
     if not isinstance(entries, list):
         raise ValueError("target file must contain a list or a {'targets': [...]} object")
     specs: dict[str, TargetSpec] = {}
+    tokens: dict[str, str] = {}
     for entry in entries:
         spec = _target_from_mapping(entry)
         if spec.name in specs:
             raise ValueError(f"duplicate target name '{spec.name}'")
+        _register_target_tokens(tokens, spec)
         specs[spec.name] = spec
     return specs
 
@@ -173,6 +175,17 @@ def _shape_value(value: Any, field: str) -> str:
     if shape not in {"box", "sphere", "cylinder", "capsule"}:
         raise ValueError(f"{field} must be one of box, sphere, cylinder, capsule")
     return shape
+
+
+def _register_target_tokens(tokens: dict[str, str], spec: TargetSpec) -> None:
+    for token in (spec.name, *spec.aliases):
+        normalized = " ".join(token.lower().strip().split())
+        if not normalized:
+            continue
+        owner = tokens.get(normalized)
+        if owner is not None:
+            raise ValueError(f"duplicate target name or alias '{normalized}' used by '{owner}' and '{spec.name}'")
+        tokens[normalized] = spec.name
 
 
 def resolve_target(name_or_prompt: str, extra_targets: dict[str, TargetSpec] | None = None) -> TargetSpec:

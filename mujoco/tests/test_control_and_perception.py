@@ -110,6 +110,52 @@ def test_depth_anchor_rejects_mask_depth_outliers() -> None:
     assert bbox_max[2] < -0.9
 
 
+def test_depth_anchor_rejects_invalid_bbox_without_crashing() -> None:
+    observation = CameraObservation(
+        frame_bgr=np.zeros((20, 30, 3), dtype=np.uint8),
+        depth_m=np.ones((20, 30), dtype=np.float32),
+        intrinsics=CameraIntrinsics(fx=30.0, fy=30.0, cx=15.0, cy=10.0, width=30, height=20),
+        camera_position=np.zeros(3, dtype=float),
+        camera_xmat=np.eye(3, dtype=float),
+    )
+    position, mask, bbox_min, bbox_max, anchor_type = _estimate_world_position(
+        observation,
+        np.array([5.0, np.nan, 2.0, 9.0]),
+        None,
+    )
+    assert position is None
+    assert anchor_type == "invalid_bbox"
+    assert bbox_min is None
+    assert bbox_max is None
+    assert mask.shape == (20, 30)
+
+
+def test_observation_rejects_nonfinite_camera_pose() -> None:
+    target = resolve_target("box")
+    observation = CameraObservation(
+        frame_bgr=np.zeros((12, 16, 3), dtype=np.uint8),
+        depth_m=np.ones((12, 16), dtype=np.float32),
+        intrinsics=CameraIntrinsics(fx=12.0, fy=12.0, cx=8.0, cy=6.0, width=16, height=12),
+        camera_position=np.array([0.0, np.nan, 0.0]),
+        camera_xmat=np.eye(3, dtype=float),
+    )
+    with pytest.raises(ValueError, match="camera_position"):
+        ColorSegmentationPerception().detect(observation, np.zeros(3), target, "box")
+
+
+def test_observation_rejects_nonfinite_intrinsics() -> None:
+    target = resolve_target("box")
+    observation = CameraObservation(
+        frame_bgr=np.zeros((12, 16, 3), dtype=np.uint8),
+        depth_m=np.ones((12, 16), dtype=np.float32),
+        intrinsics=CameraIntrinsics(fx=np.nan, fy=12.0, cx=8.0, cy=6.0, width=16, height=12),
+        camera_position=np.zeros(3, dtype=float),
+        camera_xmat=np.eye(3, dtype=float),
+    )
+    with pytest.raises(ValueError, match="intrinsics"):
+        ColorSegmentationPerception().detect(observation, np.zeros(3), target, "box")
+
+
 def test_semantic_detect_reuses_initialized_local_tracker_without_models() -> None:
     target = resolve_target("apple")
     image = np.zeros((120, 160, 3), dtype=np.uint8)
