@@ -5,31 +5,68 @@ import json
 import math
 
 from .app import run_demo
-from .config import CameraConfig, ControllerConfig, DemoConfig, DepthConfig, available_depth_backends, available_robots, available_tasks, available_trajectories, validate_config
+from .config import (
+    CameraConfig,
+    ControllerConfig,
+    DemoConfig,
+    DepthConfig,
+    available_depth_backends,
+    available_detectors,
+    available_robots,
+    available_tasks,
+    available_trajectories,
+    validate_config,
+)
 from .targets import TARGETS
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MuJoCo visual-servo tracking demo")
-    parser.add_argument("--robot", default="panda", choices=available_robots(), help="robot model")
+    parser.add_argument("--robot", default="panda", help=f"robot model or alias; built-ins: {', '.join(available_robots())}")
+    parser.add_argument("--robot-file", default=None, help="strict JSON robot descriptor; relative asset paths resolve from this file")
     parser.add_argument("--target", default="cup", help="target object word or phrase, e.g. cup, capsule, hammer, red apple")
     parser.add_argument("--target-file", default=None, help="JSON file with additional target specs")
+    parser.add_argument("--prompt", default=None, help="perception prompt; defaults to the selected target name")
     parser.add_argument("--trajectory", default="circle", choices=available_trajectories(), help="target motion")
-    parser.add_argument("--task", default="contact", choices=available_tasks(), help="servo objective")
-    parser.add_argument("--detector", default="semantic", choices=("semantic", "oracle", "color"), help="perception backend; semantic is the primary path")
-    parser.add_argument("--depth-backend", default="mujoco", choices=available_depth_backends(), help="depth provider for 3D target anchors")
-    parser.add_argument("--depth-model", default="depth-anything/Depth-Anything-V2-Small-hf", help="Hugging Face model for --depth-backend depth-anything-v2")
-    parser.add_argument("--depth-device", default="auto", help="device for optional learned depth backend: auto, cpu, mps, or cuda")
+    parser.add_argument("--task", default="front-standoff", choices=available_tasks(), help="servo objective")
+    parser.add_argument(
+        "--detector",
+        default="color",
+        choices=available_detectors(),
+        help="perception backend; color works without optional model downloads",
+    )
+    parser.add_argument(
+        "--depth-backend",
+        default="mujoco",
+        choices=available_depth_backends(),
+        help="depth provider for 3D target anchors",
+    )
+    parser.add_argument(
+        "--depth-model",
+        default="depth-anything/Depth-Anything-V2-Small-hf",
+        help="Hugging Face model for --depth-backend depth-anything-v2",
+    )
+    parser.add_argument(
+        "--depth-device",
+        default="auto",
+        type=_lower_text,
+        choices=("auto", "cpu", "mps", "cuda"),
+        help="device for optional learned depth backend",
+    )
     parser.add_argument("--no-depth-metric-hint", action="store_true", help="do not calibrate learned depth with MuJoCo metric depth")
     parser.add_argument("--steps", type=int, default=None, help="control steps to run; defaults to 1000000 with viewer, 1200 headless")
     parser.add_argument("--headless", action="store_true", help="run without the MuJoCo viewer")
     parser.add_argument("--no-realtime", action="store_true", help="do not sleep to match wall-clock time")
-    parser.add_argument("--scripted-target", action="store_true", help="disable keyboard target offsets and use only the scripted trajectory")
+    parser.add_argument(
+        "--scripted-target",
+        action="store_true",
+        help="disable keyboard target offsets and use only the scripted trajectory",
+    )
     parser.add_argument("--key-speed-cm-s", type=float, default=18.0, help="continuous keyboard target speed in centimeters per second")
-    parser.add_argument("--semantic-interval", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--debug-perception", action="store_true", help="print semantic/depth detection diagnostics")
     parser.add_argument("--no-camera-overlay", action="store_true", help="hide the robot camera overlay in the MuJoCo viewer")
     parser.add_argument("--camera-fps", type=float, default=6.0, help="robot camera processing rate in viewer mode")
+    parser.add_argument("--detection-timeout", type=float, default=0.75, help="seconds before a stale visual target is discarded")
     parser.add_argument("--overlay-width-frac", type=float, default=0.42, help="fraction of viewer width used by the camera overlay")
     parser.add_argument("--standoff", type=float, default=None, help="standoff distance in meters")
     parser.add_argument("--standoff-cm", type=float, default=16.0, help="standoff distance in centimeters for standoff/front-standoff")
@@ -47,6 +84,8 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         raise argparse.ArgumentTypeError("--camera-width and --camera-height must be at least 32")
     if not _is_finite(args.camera_fps) or args.camera_fps <= 0.0:
         raise argparse.ArgumentTypeError("--camera-fps must be positive")
+    if not _is_finite(args.detection_timeout) or args.detection_timeout <= 0.0:
+        raise argparse.ArgumentTypeError("--detection-timeout must be positive")
     if not _is_finite(args.key_speed_cm_s) or args.key_speed_cm_s < 0.0:
         raise argparse.ArgumentTypeError("--key-speed-cm-s must be non-negative")
     if args.standoff is not None and (not _is_finite(args.standoff) or args.standoff < 0.0):
@@ -84,6 +123,9 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         camera=camera,
         depth=depth,
         controller=controller,
+        robot_file=args.robot_file,
+        perception_prompt=None if args.prompt is None else args.prompt.strip(),
+        detection_timeout_s=float(args.detection_timeout),
     )
     validate_config(config)
     return config
@@ -96,6 +138,10 @@ def _is_finite(value: float) -> bool:
         return False
 
 
+def _lower_text(value: str) -> str:
+    return value.strip().lower()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -105,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = config_from_args(args)
         summary = run_demo(config)
-    except (ValueError, argparse.ArgumentTypeError) as exc:
+    except (ValueError, argparse.ArgumentTypeError, RuntimeError, FileNotFoundError, OSError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
     print(json.dumps(summary.as_dict(), indent=2, sort_keys=True))
     return 0

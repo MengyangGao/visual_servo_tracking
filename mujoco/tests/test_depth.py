@@ -13,6 +13,14 @@ from mujoco_servo.depth import DepthAnythingV2Backend, DepthEstimate, build_dept
 from mujoco_servo.perception import CameraIntrinsics, CameraObservation
 
 
+def _fake_learned_backend(result: dict, *, use_hint: bool = True) -> DepthAnythingV2Backend:
+    backend = object.__new__(DepthAnythingV2Backend)
+    backend._image_cls = types.SimpleNamespace(fromarray=lambda array: array)
+    backend._pipe = lambda image: result
+    backend._use_metric_hint = use_hint
+    return backend
+
+
 def test_mujoco_depth_backend_returns_metric_hint() -> None:
     backend = build_depth_backend(DepthConfig(backend="mujoco"))
     image = np.zeros((8, 10, 3), dtype=np.uint8)
@@ -31,29 +39,45 @@ def test_mujoco_depth_backend_rejects_shape_mismatch() -> None:
         backend.estimate(image, metric)
 
 
-def test_depth_backend_rejects_nonfinite_float_frame() -> None:
+def test_mujoco_depth_backend_does_not_mark_all_nan_hint_metric() -> None:
+    backend = build_depth_backend(DepthConfig(backend="mujoco"))
+    estimate = backend.estimate(np.zeros((8, 10, 3), dtype=np.uint8), np.full((8, 10), np.nan, dtype=np.float32))
+    assert not estimate.metric
+    assert np.isnan(estimate.depth_m).all()
+
+
+def test_depth_backend_rejects_non_uint8_frame() -> None:
     backend = build_depth_backend(DepthConfig(backend="none"))
     image = np.zeros((8, 10, 3), dtype=np.float32)
-    image[0, 0, 0] = np.nan
-    with pytest.raises(ValueError, match="frame_bgr"):
+    with pytest.raises(ValueError, match="uint8"):
         backend.estimate(image)
 
 
 def test_depth_anything_backend_can_be_mocked_and_metric_calibrated(monkeypatch) -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
     class FakeMps:
         @staticmethod
         def is_available() -> bool:
             return False
 
-    fake_torch = types.SimpleNamespace(backends=types.SimpleNamespace(mps=FakeMps()))
+    fake_torch = types.SimpleNamespace(cuda=FakeCuda(), backends=types.SimpleNamespace(mps=FakeMps()))
     fake_image = types.SimpleNamespace(fromarray=lambda array: array)
+    raw = np.tile(np.linspace(0.2, 1.0, 6, dtype=np.float32), (4, 1))
 
     def fake_pipeline(task, model, device):
         assert task == "depth-estimation"
-        assert model == "fake-depth-anything"
+        assert model == "fake-metric-depth-anything"
+        assert device == 0
 
         def run(image):
-            return {"depth": np.tile(np.linspace(0.2, 1.0, 6, dtype=np.float32), (4, 1))}
+            return {
+                "predicted_depth": raw[None, :, :],
+                "depth": np.full((4, 6), 255, dtype=np.uint8),
+            }
 
         return run
 
@@ -62,14 +86,66 @@ def test_depth_anything_backend_can_be_mocked_and_metric_calibrated(monkeypatch)
     monkeypatch.setitem(sys.modules, "PIL.Image", fake_image)
     monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(pipeline=fake_pipeline))
 
-    backend = DepthAnythingV2Backend(DepthConfig(backend="depth-anything-v2", model="fake-depth-anything"))
+    backend = DepthAnythingV2Backend(DepthConfig(backend="depth-anything-v2", model="fake-metric-depth-anything"))
     image = np.zeros((4, 6, 3), dtype=np.uint8)
-    metric_hint = np.full((4, 6), 2.0, dtype=np.float32)
+    metric_hint = 0.6 + 1.8 * raw
     estimate = backend.estimate(image, metric_hint)
     assert estimate.backend == "depth-anything-v2"
     assert estimate.metric
     assert estimate.depth_m.shape == (4, 6)
-    assert np.isclose(np.median(estimate.depth_m), 2.0, atol=1e-5)
+    assert np.allclose(estimate.depth_m, metric_hint, atol=1e-5)
+    without_hint = backend.estimate(image)
+    assert not without_hint.metric
+
+
+def test_depth_anything_relative_without_hint_is_never_metric() -> None:
+    raw = np.tile(np.linspace(0.2, 1.0, 6, dtype=np.float32), (4, 1))
+    backend = _fake_learned_backend({"predicted_depth": raw})
+    estimate = backend.estimate(np.zeros((4, 6, 3), dtype=np.uint8))
+    assert not estimate.metric
+    assert np.nanmin(estimate.depth_m) >= 1e-3
+    assert np.nanmax(estimate.depth_m) <= 1.0
+
+
+def test_depth_anything_all_nan_hint_does_not_claim_metric() -> None:
+    raw = np.tile(np.linspace(0.2, 1.0, 6, dtype=np.float32), (4, 1))
+    backend = _fake_learned_backend({"predicted_depth": raw})
+    estimate = backend.estimate(np.zeros((4, 6, 3), dtype=np.uint8), np.full((4, 6), np.nan, dtype=np.float32))
+    assert not estimate.metric
+
+
+def test_depth_anything_constant_prediction_fails_metric_calibration() -> None:
+    raw = np.ones((4, 6), dtype=np.float32)
+    hint = np.tile(np.linspace(0.8, 2.0, 6, dtype=np.float32), (4, 1))
+    backend = _fake_learned_backend({"predicted_depth": raw})
+    estimate = backend.estimate(np.zeros((4, 6, 3), dtype=np.uint8), hint)
+    assert not estimate.metric
+    assert np.allclose(estimate.depth_m, 1e-3)
+
+
+def test_depth_anything_bad_calibration_residual_stays_relative() -> None:
+    raw = np.tile(np.linspace(0.2, 1.4, 12, dtype=np.float32), (4, 1))
+    hint = 1.4 + 0.5 * np.sin(raw * 13.0)
+    backend = _fake_learned_backend({"predicted_depth": raw})
+    estimate = backend.estimate(np.zeros((4, 12, 3), dtype=np.uint8), hint)
+    assert not estimate.metric
+
+
+def test_depth_anything_can_fit_inverse_relative_depth() -> None:
+    hint = np.tile(np.linspace(0.8, 2.4, 12, dtype=np.float32), (4, 1))
+    raw = 1.0 / hint
+    backend = _fake_learned_backend({"predicted_depth": raw})
+    estimate = backend.estimate(np.zeros((4, 12, 3), dtype=np.uint8), hint)
+    assert estimate.metric
+    assert np.allclose(estimate.depth_m, hint, atol=1e-4)
+
+
+def test_depth_anything_visualization_output_is_not_treated_as_metric() -> None:
+    visualization = np.tile(np.arange(6, dtype=np.uint8), (4, 1))
+    hint = 1.0 + visualization.astype(np.float32)
+    backend = _fake_learned_backend({"depth": visualization})
+    estimate = backend.estimate(np.zeros((4, 6, 3), dtype=np.uint8), hint)
+    assert not estimate.metric
 
 
 def test_app_resolves_pending_learned_depth_off_main_thread_path() -> None:

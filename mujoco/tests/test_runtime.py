@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ def test_headless_demo_reduces_contact_error() -> None:
         viewer=False,
         realtime=False,
         controller=ControllerConfig(task="contact", control_hz=120.0),
+        camera_fps=1000.0,
     )
     app = VisualServoSimulation(cfg)
     start_target = app.motion.position(0.0)
@@ -54,20 +56,20 @@ def test_headless_circle_smoke() -> None:
     assert summary.final_error_m < summary.max_error_m
 
 
-def test_contact_task_rejects_target_too_wide_for_panda_gripper() -> None:
+def test_contact_task_center_tracking_accepts_wide_visual_target() -> None:
     cfg = DemoConfig(
         robot="panda",
         target="sphere",
         trajectory="static",
         detector="oracle",
-        steps=1,
+        steps=600,
         headless=True,
         viewer=False,
         realtime=False,
         controller=ControllerConfig(task="contact", control_hz=120.0),
     )
-    with pytest.raises(ValueError, match="gripper width"):
-        VisualServoSimulation(cfg)
+    summary = VisualServoSimulation(cfg).run()
+    assert summary.final_error_m < 0.03
 
 
 def test_standoff_task_accepts_target_too_wide_for_panda_gripper() -> None:
@@ -113,6 +115,7 @@ def test_non_oracle_without_detection_holds_end_effector(monkeypatch) -> None:
         viewer=False,
         realtime=False,
         controller=ControllerConfig(task="contact", control_hz=120.0),
+        camera_fps=1000.0,
     )
     app = VisualServoSimulation(cfg)
     monkeypatch.setattr(app, "_update_perception", lambda viewer, truth_position: None)
@@ -141,6 +144,7 @@ def test_semantic_mock_detection_drives_without_truth_fallback(monkeypatch) -> N
         viewer=False,
         realtime=False,
         controller=ControllerConfig(task="contact", control_hz=120.0),
+        camera_fps=1000.0,
     )
     app = VisualServoSimulation(cfg)
     monkeypatch.setattr(app, "_render_camera_observation", lambda: None)
@@ -152,9 +156,11 @@ def test_semantic_mock_detection_drives_without_truth_fallback(monkeypatch) -> N
     assert summary.oracle_truth_steps == 0
 
 
-def test_color_detector_drives_moving_visible_target() -> None:
+@pytest.mark.parametrize(("robot", "target"), [("panda", "cup"), ("ur5e", "box"), ("lite6", "apple")])
+def test_color_detector_drives_moving_visible_target(robot, target) -> None:
     cfg = DemoConfig(
-        target="cup",
+        robot=robot,
+        target=target,
         trajectory="circle",
         detector="color",
         steps=12,
@@ -163,7 +169,12 @@ def test_color_detector_drives_moving_visible_target() -> None:
         realtime=False,
         controller=ControllerConfig(task="contact", control_hz=120.0),
     )
-    summary = VisualServoSimulation(cfg).run()
+    try:
+        summary = VisualServoSimulation(cfg).run()
+    except RuntimeError as exc:
+        if "camera rendering is unavailable" in str(exc):
+            pytest.skip(str(exc))
+        raise
     assert summary.perception_updates > 0
     assert summary.hold_steps == 0
     assert summary.truth_fallback_steps == 0
@@ -186,6 +197,7 @@ def test_implausible_detection_is_rejected(monkeypatch) -> None:
         viewer=False,
         realtime=False,
         controller=ControllerConfig(task="contact", control_hz=120.0),
+        camera_fps=1000.0,
     )
     app = VisualServoSimulation(cfg)
     monkeypatch.setattr(app, "_render_camera_observation", lambda: None)
@@ -212,6 +224,7 @@ def test_malformed_detection_position_is_rejected(monkeypatch) -> None:
         viewer=False,
         realtime=False,
         controller=ControllerConfig(task="contact", control_hz=120.0),
+        camera_fps=1000.0,
     )
     app = VisualServoSimulation(cfg)
     monkeypatch.setattr(app, "_render_camera_observation", lambda: None)
@@ -262,7 +275,27 @@ def test_oracle_moving_target_moves_each_robot() -> None:
         assert np.linalg.norm(end_ee - start_ee) > 1e-3
 
 
-def test_semantic_viewer_mode_loads_backend_on_main_thread(monkeypatch) -> None:
+def test_front_standoff_converges_and_faces_target_for_each_robot() -> None:
+    for robot in ("panda", "ur5e", "lite6"):
+        summary = VisualServoSimulation(
+            DemoConfig(
+                robot=robot,
+                target="box",
+                trajectory="static",
+                detector="oracle",
+                steps=1200,
+                headless=True,
+                viewer=False,
+                realtime=False,
+                controller=ControllerConfig(task="front-standoff", standoff_m=0.16),
+            )
+        ).run()
+        assert summary.final_error_m < 0.035, robot
+        assert abs(summary.final_target_distance_m - 0.16) < 0.02, robot
+        assert summary.final_orientation_error_rad < 0.60, robot
+
+
+def test_semantic_viewer_mode_lazily_loads_backend(monkeypatch) -> None:
     class FakeSemantic:
         name = "semantic"
 
@@ -272,7 +305,8 @@ def test_semantic_viewer_mode_loads_backend_on_main_thread(monkeypatch) -> None:
     monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
     cfg = DemoConfig(target="cup", trajectory="static", detector="semantic", steps=1, headless=False, viewer=True, realtime=False)
     app = VisualServoSimulation(cfg)
-    assert app.perception is not None
+    assert app.perception is None
+    assert app._ensure_perception() is not None
     assert app.detector_name == "semantic"
 
 
@@ -298,6 +332,217 @@ def test_sync_viewer_perception_is_camera_fps_throttled(monkeypatch) -> None:
     assert app._update_perception(object(), np.array([0.4, 0.0, 0.3], dtype=float)) is not None
     assert app._update_perception(object(), np.array([0.4, 0.0, 0.3], dtype=float)) is None
     assert calls == 1
+
+
+def test_headless_perception_uses_simulation_time_camera_rate(monkeypatch) -> None:
+    class FakeSemantic:
+        name = "semantic"
+
+        def detect(self, observation, truth_position, target, prompt):
+            return Detection(True, self.name, truth_position.copy(), score=1.0)
+
+    monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="static",
+        detector="semantic",
+        steps=50,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        camera_fps=6.0,
+        controller=ControllerConfig(task="contact"),
+    )
+    app = VisualServoSimulation(cfg)
+    monkeypatch.setattr(app, "_render_camera_observation", lambda: None)
+    summary = app.run()
+    assert summary.perception_updates == 3
+
+
+def test_semantic_prompt_is_independent_from_target_model(monkeypatch) -> None:
+    prompts: list[str] = []
+
+    class FakeSemantic:
+        name = "semantic"
+
+        def detect(self, observation, truth_position, target, prompt):
+            prompts.append(prompt)
+            return Detection(True, self.name, truth_position.copy(), score=1.0)
+
+    monkeypatch.setattr(app_module, "build_perception", lambda name: FakeSemantic())
+    app = VisualServoSimulation(
+        DemoConfig(
+            target="cup",
+            perception_prompt="red drinking vessel",
+            trajectory="static",
+            detector="semantic",
+            steps=1,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            camera_fps=1000.0,
+        )
+    )
+    monkeypatch.setattr(app, "_render_camera_observation", lambda: None)
+    app.run()
+    assert prompts == ["red drinking vessel"]
+
+
+def test_stale_visual_detection_expires_and_holds(monkeypatch) -> None:
+    cfg = DemoConfig(
+        target="cup",
+        trajectory="static",
+        detector="color",
+        steps=12,
+        headless=True,
+        viewer=False,
+        realtime=False,
+        detection_timeout_s=0.02,
+        controller=ControllerConfig(task="contact"),
+    )
+    app = VisualServoSimulation(cfg)
+    calls = 0
+
+    def detect_once(viewer, truth_position):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return Detection(True, "color-test", truth_position.copy(), score=1.0)
+        return None
+
+    monkeypatch.setattr(app, "_update_perception", detect_once)
+    summary = app.run()
+    assert summary.perception_updates == 1
+    assert summary.hold_steps >= 8
+    assert summary.truth_fallback_steps == 0
+
+
+def test_public_state_age_uses_last_accepted_detection_and_hides_stale_position() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            detector="color",
+            steps=0,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            detection_timeout_s=0.1,
+        )
+    )
+    accepted = Detection(True, "color-test", np.array([0.5, 0.1, 0.4]), score=1.0)
+    app._last_accepted_detection = accepted
+    app._last_accepted_detection_position = accepted.target_position.copy()
+    app._last_accepted_detection_sim_time = 0.0
+    app._last_detection_wall_time = 1.0e20  # A later rejected raw detection must not refresh accepted age.
+    app.scene.data.time = 1.0
+    state = app.get_state()
+    assert np.isclose(state.detection_age_s, 1.0)
+    assert state.detected_position is None
+    assert state.detection_backend is None
+
+
+def test_public_state_reads_positions_from_mujoco() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            target="cup",
+            trajectory="static",
+            detector="oracle",
+            steps=2,
+            headless=True,
+            viewer=False,
+            realtime=False,
+        )
+    )
+    summary = app.run()
+    state = app.get_state()
+    assert np.allclose(state.target_position, app.get_site_position("target_site"))
+    assert state.target_position.shape == (3,)
+    assert state.end_effector_position.shape == (3,)
+    assert state.camera_position.shape == (3,)
+    assert state.joint_positions.shape == (app.robot.dof,)
+    assert np.allclose(summary.final_target_position, state.target_position)
+    assert np.allclose(summary.final_end_effector_position, state.end_effector_position)
+
+
+def test_default_camera_frames_each_robot_workspace_and_custom_pose_is_preserved() -> None:
+    ur_app = VisualServoSimulation(
+        DemoConfig(robot="ur5e", trajectory="static", detector="oracle", steps=0, headless=True, viewer=False, realtime=False)
+    )
+    assert np.allclose(ur_app.camera.lookat, ur_app.motion.position(0.0))
+    offset = np.asarray(ur_app.camera.position) - np.asarray(ur_app.camera.lookat)
+    approach = np.asarray(ur_app.camera.lookat)[:2]
+    assert np.isclose(np.linalg.norm(offset[:2]), 1.2)
+    assert np.isclose(np.dot(offset[:2], approach), 0.0, atol=1e-9)
+    assert offset[1] <= 0.0
+    assert np.isclose(offset[2], 0.7)
+
+    custom = CameraConfig(position=(2.0, -2.0, 1.5), lookat=(0.0, 0.0, 0.2))
+    custom_app = VisualServoSimulation(
+        DemoConfig(camera=custom, detector="oracle", steps=0, headless=True, viewer=False, realtime=False)
+    )
+    assert custom_app.camera == custom
+
+
+def test_runtime_loads_custom_robot_descriptor(tmp_path) -> None:
+    robot_xml = tmp_path / "one_link.xml"
+    robot_xml.write_text(
+        """
+        <mujoco model="one-link">
+          <worldbody>
+            <body name="base">
+              <body name="link" pos="0 0 0.2">
+                <joint name="joint" type="hinge" axis="0 0 1" range="-2 2"/>
+                <geom type="capsule" fromto="0 0 0 0.25 0 0" size="0.02"/>
+                <site name="tool" pos="0.25 0 0"/>
+              </body>
+            </body>
+          </worldbody>
+          <actuator><position name="joint_position" joint="joint" kp="50"/></actuator>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    descriptor = tmp_path / "robots.json"
+    descriptor.write_text(
+        json.dumps(
+            {
+                "name": "one-link",
+                "xml_path": "one_link.xml",
+                "asset_dir": ".",
+                "joint_names": ["joint"],
+                "actuator_names": ["joint_position"],
+                "home_qpos": [0.0],
+                "ee_frame": {"name": "tool", "type": "site"},
+                "default_target_position": [0.35, 0.0, 0.25],
+                "detection_bounds": [[-1.0, -1.0, 0.0], [1.0, 1.0, 1.0]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = VisualServoSimulation(
+        DemoConfig(
+            robot="one-link",
+            robot_file=str(descriptor),
+            target="cup",
+            trajectory="static",
+            detector="oracle",
+            steps=1,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            controller=ControllerConfig(task="standoff"),
+        )
+    )
+    summary = app.run()
+    assert summary.robot == "one-link"
+    assert state_is_finite(app.get_state())
+
+
+def state_is_finite(state) -> bool:
+    return bool(
+        np.isfinite(state.target_position).all()
+        and np.isfinite(state.end_effector_position).all()
+        and np.isfinite(state.joint_positions).all()
+    )
 
 
 def test_config_validation_rejects_bad_camera_size() -> None:
@@ -333,8 +578,9 @@ def test_zero_step_run_reports_zero_completed_steps() -> None:
     assert np.isfinite(summary.final_error_m)
 
 
-def test_default_detector_is_semantic() -> None:
-    assert DemoConfig().detector == "semantic"
+def test_default_path_uses_color_visual_front_standoff() -> None:
+    assert DemoConfig().detector == "color"
+    assert DemoConfig().controller.task == "front-standoff"
 
 
 def test_viewer_key_controls_use_requested_shortcuts() -> None:
@@ -391,3 +637,10 @@ def test_camera_overlay_uses_top_right_viewport_origin() -> None:
     assert viewer.rect.bottom == 472
     assert viewer.rect.width == 420
     assert viewer.rect.height == 316
+
+
+def test_camera_overlay_degrades_gracefully_for_legacy_viewer_api() -> None:
+    cfg = DemoConfig(detector="oracle", steps=0, headless=True, viewer=False, realtime=False)
+    app = VisualServoSimulation(cfg)
+    app._latest_overlay_bgr = np.zeros((cfg.camera.height, cfg.camera.width, 3), dtype=np.uint8)
+    app._update_viewer_overlay(object())

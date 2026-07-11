@@ -12,6 +12,7 @@ __pycache__/
 env/
 
 *.log
+MUJOCO_LOG.TXT
 *.tmp
 
 mujoco/__pycache__/

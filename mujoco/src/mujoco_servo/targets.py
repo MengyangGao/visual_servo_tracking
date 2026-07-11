@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from numbers import Real
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -77,6 +79,28 @@ TARGETS: dict[str, TargetSpec] = {
     ),
 }
 
+
+_PRIMITIVE_SHAPES = frozenset({"box", "sphere", "cylinder", "capsule"})
+_TARGET_SHAPES = _PRIMITIVE_SHAPES | {"compound", "mesh"}
+_PART_SHAPES = _PRIMITIVE_SHAPES | {"mesh"}
+_MESH_SUFFIXES = frozenset({".obj", ".stl"})
+_TARGET_FIELDS = frozenset(
+    {
+        "name",
+        "shape",
+        "size",
+        "rgba",
+        "aliases",
+        "base_position",
+        "parts",
+        "mesh_file",
+        "mesh_path",
+        "scale",
+        "mesh_scale",
+    }
+)
+_PART_FIELDS = frozenset({"shape", "size", "pos", "offset", "rgba", "quat", "mesh_file", "mesh_path", "scale", "mesh_scale"})
+
 BASE_POSITIONS: dict[str, np.ndarray] = {
     "cup": np.array([0.48, 0.02, 0.34], dtype=float),
     "apple": np.array([0.44, 0.13, 0.33], dtype=float),
@@ -95,15 +119,28 @@ BASE_POSITIONS: dict[str, np.ndarray] = {
 def load_target_specs(path: str | Path | None) -> dict[str, TargetSpec]:
     if path is None:
         return {}
-    source = Path(path)
-    payload = json.loads(source.read_text())
-    entries = payload.get("targets", payload if isinstance(payload, list) else None)
+    source = Path(path).expanduser()
+    payload = json.loads(
+        source.read_text(encoding="utf-8"),
+        object_pairs_hook=_unique_json_object,
+        parse_constant=_reject_json_constant,
+    )
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        unknown = set(payload) - {"targets"}
+        if unknown:
+            raise ValueError(f"target file contains unknown top-level fields: {', '.join(sorted(unknown))}")
+        entries = payload.get("targets")
+    else:
+        entries = None
     if not isinstance(entries, list):
         raise ValueError("target file must contain a list or a {'targets': [...]} object")
+    base_dir = source.resolve().parent
     specs: dict[str, TargetSpec] = {}
     tokens: dict[str, str] = {}
     for entry in entries:
-        spec = _target_from_mapping(entry)
+        spec = _target_from_mapping(entry, base_dir)
         if spec.name in specs:
             raise ValueError(f"duplicate target name '{spec.name}'")
         _register_target_tokens(tokens, spec)
@@ -111,44 +148,130 @@ def load_target_specs(path: str | Path | None) -> dict[str, TargetSpec]:
     return specs
 
 
-def _target_from_mapping(entry: Any) -> TargetSpec:
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key '{key}'")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid non-finite JSON number '{value}'")
+
+
+def _target_from_mapping(entry: Any, base_dir: Path | None = None) -> TargetSpec:
     if not isinstance(entry, dict):
         raise ValueError("target entries must be objects")
+    _reject_unknown_fields(entry, _TARGET_FIELDS, "target")
+    root = Path.cwd() if base_dir is None else base_dir
     name = _required_text(entry, "name")
-    shape = _shape_value(entry.get("shape", "box"), "shape")
+    raw_parts = entry.get("parts", [])
+    if not isinstance(raw_parts, list):
+        raise ValueError("parts must be a list")
+    default_shape = "compound" if raw_parts else "box"
+    shape = _shape_value(entry.get("shape", default_shape), "shape", _TARGET_SHAPES)
     size = _positive_float_tuple(entry.get("size", (0.10, 0.10, 0.10)), 3, "size")
+    _validate_shape_size(shape, size, "size")
     rgba = _rgba_tuple(entry.get("rgba", (0.85, 0.25, 0.25, 1.0)), "rgba")
-    aliases = tuple(str(value).strip().lower() for value in entry.get("aliases", ()) if str(value).strip())
+    aliases = _aliases_tuple(entry.get("aliases", []))
     base = entry.get("base_position")
     base_position = None if base is None else _float_tuple(base, 3, "base_position")
-    parts = tuple(_target_part_from_mapping(part) for part in entry.get("parts", ()))
-    return TargetSpec(name=name, shape=shape, size=size, rgba=rgba, aliases=aliases, parts=parts, base_position=base_position)
+    parts = tuple(_target_part_from_mapping(part, root) for part in raw_parts)
+    mesh_path = _mesh_path_from_mapping(entry, root, "target")
+    mesh_scale = _mesh_scale_from_mapping(entry, "target")
+    if shape == "compound":
+        if not parts:
+            raise ValueError("compound target must contain at least one part")
+        if mesh_path is not None or "scale" in entry or "mesh_scale" in entry:
+            raise ValueError("compound target cannot define a top-level mesh or mesh scale")
+    elif shape == "mesh":
+        if parts:
+            raise ValueError("mesh target cannot also contain parts")
+        if mesh_path is None:
+            raise ValueError("mesh target requires mesh_file or mesh_path")
+        if "size" not in entry:
+            raise ValueError("mesh target requires size as its approximate bounding box")
+    else:
+        if parts:
+            raise ValueError(f"{shape} target cannot also contain parts; use shape 'compound'")
+        if mesh_path is not None or "scale" in entry or "mesh_scale" in entry:
+            raise ValueError(f"{shape} target cannot define mesh_file, mesh_path, or mesh scale")
+    return TargetSpec(
+        name=name,
+        shape=shape,
+        size=size,
+        rgba=rgba,
+        aliases=aliases,
+        parts=parts,
+        base_position=base_position,
+        mesh_path=mesh_path,
+        mesh_scale=mesh_scale,
+    )
 
 
-def _target_part_from_mapping(entry: Any) -> TargetPart:
+def _target_part_from_mapping(entry: Any, base_dir: Path | None = None) -> TargetPart:
     if not isinstance(entry, dict):
         raise ValueError("target parts must be objects")
+    _reject_unknown_fields(entry, _PART_FIELDS, "target part")
+    if "pos" in entry and "offset" in entry:
+        raise ValueError("target part must use only one of pos or offset")
+    root = Path.cwd() if base_dir is None else base_dir
+    shape = _shape_value(entry.get("shape", "box"), "part.shape", _PART_SHAPES)
     rgba = entry.get("rgba")
     quat = entry.get("quat")
     pos_value = entry.get("pos", entry.get("offset", (0.0, 0.0, 0.0)))
+    mesh_path = _mesh_path_from_mapping(entry, root, "target part")
+    mesh_scale = _mesh_scale_from_mapping(entry, "target part")
+    if shape == "mesh":
+        if mesh_path is None:
+            raise ValueError("mesh target part requires mesh_file or mesh_path")
+        if "size" not in entry:
+            raise ValueError("mesh target part requires size as its approximate bounding box")
+    elif mesh_path is not None or "scale" in entry or "mesh_scale" in entry:
+        raise ValueError(f"{shape} target part cannot define mesh_file, mesh_path, or mesh scale")
+    size = _positive_float_tuple(entry.get("size", (0.05, 0.05, 0.05)), 3, "part.size")
+    _validate_shape_size(shape, size, "part.size")
     return TargetPart(
-        shape=_shape_value(entry.get("shape", "box"), "part.shape"),
-        size=_positive_float_tuple(entry.get("size", (0.05, 0.05, 0.05)), 3, "part.size"),
+        shape=shape,
+        size=size,
         pos=_float_tuple(pos_value, 3, "part.pos"),
         rgba=None if rgba is None else _rgba_tuple(rgba, "part.rgba"),
-        quat=None if quat is None else _float_tuple(quat, 4, "part.quat"),
+        quat=None if quat is None else _quat_tuple(quat, "part.quat"),
+        mesh_path=mesh_path,
+        mesh_scale=mesh_scale,
     )
 
 
 def _required_text(entry: dict[str, Any], key: str) -> str:
-    value = str(entry.get(key, "")).strip().lower()
+    raw_value = entry.get(key)
+    if not isinstance(raw_value, str):
+        raise ValueError(f"target entry '{key}' must be a string")
+    value = _normalize_text(raw_value)
     if not value:
         raise ValueError(f"target entry missing '{key}'")
     return value
 
 
+def _aliases_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError("aliases must be a list of strings")
+    aliases: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"aliases[{index}] must be a string")
+        alias = _normalize_text(item)
+        if not alias:
+            raise ValueError(f"aliases[{index}] must be non-empty")
+        aliases.append(alias)
+    return tuple(aliases)
+
+
 def _float_tuple(value: Any, expected: int, field: str) -> tuple[float, ...]:
     if not isinstance(value, (list, tuple)) or len(value) != expected:
+        raise ValueError(f"{field} must contain {expected} numbers")
+    if any(isinstance(item, bool) or not isinstance(item, Real) for item in value):
         raise ValueError(f"{field} must contain {expected} numbers")
     values = tuple(float(item) for item in value)
     if not np.isfinite(values).all():
@@ -163,6 +286,15 @@ def _positive_float_tuple(value: Any, expected: int, field: str) -> tuple[float,
     return values
 
 
+def _quat_tuple(value: Any, field: str) -> tuple[float, float, float, float]:
+    quat = np.asarray(_float_tuple(value, 4, field), dtype=float)
+    norm = float(np.linalg.norm(quat))
+    if norm <= 1e-12:
+        raise ValueError(f"{field} must be non-zero")
+    normalized = quat / norm
+    return tuple(float(item) for item in normalized)
+
+
 def _rgba_tuple(value: Any, field: str) -> tuple[float, float, float, float]:
     rgba = _float_tuple(value, 4, field)
     if any(item < 0.0 or item > 1.0 for item in rgba):
@@ -170,16 +302,63 @@ def _rgba_tuple(value: Any, field: str) -> tuple[float, float, float, float]:
     return rgba
 
 
-def _shape_value(value: Any, field: str) -> str:
-    shape = str(value).strip().lower()
-    if shape not in {"box", "sphere", "cylinder", "capsule"}:
-        raise ValueError(f"{field} must be one of box, sphere, cylinder, capsule")
+def _shape_value(value: Any, field: str, supported: frozenset[str]) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    shape = value.strip().lower()
+    if shape not in supported:
+        raise ValueError(f"{field} must be one of {', '.join(sorted(supported))}")
     return shape
+
+
+def _validate_shape_size(shape: str, size: tuple[float, ...], field: str) -> None:
+    if shape == "sphere" and not np.allclose(size, size[0], rtol=1e-6, atol=1e-9):
+        raise ValueError(f"{field} for sphere must contain three equal diameters")
+    if shape in {"cylinder", "capsule"} and not np.isclose(size[0], size[1], rtol=1e-6, atol=1e-9):
+        raise ValueError(f"{field} for {shape} must use equal x/y diameters")
+    if shape == "capsule" and size[2] <= size[0]:
+        raise ValueError(f"{field} for capsule must have height greater than its diameter")
+
+
+def _reject_unknown_fields(entry: dict[str, Any], allowed: frozenset[str], label: str) -> None:
+    unknown = set(entry) - allowed
+    if unknown:
+        raise ValueError(f"{label} contains unknown fields: {', '.join(sorted(unknown))}")
+
+
+def _mesh_path_from_mapping(entry: dict[str, Any], base_dir: Path, label: str) -> Path | None:
+    keys = [key for key in ("mesh_file", "mesh_path") if key in entry]
+    if len(keys) > 1:
+        raise ValueError(f"{label} must use only one of mesh_file or mesh_path")
+    if not keys:
+        return None
+    raw_path = entry[keys[0]]
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError(f"{label} {keys[0]} must be a non-empty path string")
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    path = path.resolve()
+    if path.suffix.lower() not in _MESH_SUFFIXES:
+        raise ValueError(f"{label} mesh must be an OBJ or STL file")
+    if not path.is_file():
+        raise ValueError(f"{label} mesh file does not exist: {path}")
+    return path
+
+
+def _mesh_scale_from_mapping(entry: dict[str, Any], label: str) -> tuple[float, float, float]:
+    keys = [key for key in ("scale", "mesh_scale") if key in entry]
+    if len(keys) > 1:
+        raise ValueError(f"{label} must use only one of scale or mesh_scale")
+    if not keys:
+        return (1.0, 1.0, 1.0)
+    values = _positive_float_tuple(entry[keys[0]], 3, f"{label}.scale")
+    return tuple(float(item) for item in values)
 
 
 def _register_target_tokens(tokens: dict[str, str], spec: TargetSpec) -> None:
     for token in (spec.name, *spec.aliases):
-        normalized = " ".join(token.lower().strip().split())
+        normalized = _normalize_text(token)
         if not normalized:
             continue
         owner = tokens.get(normalized)
@@ -189,22 +368,59 @@ def _register_target_tokens(tokens: dict[str, str], spec: TargetSpec) -> None:
 
 
 def resolve_target(name_or_prompt: str, extra_targets: dict[str, TargetSpec] | None = None) -> TargetSpec:
-    text = " ".join(name_or_prompt.lower().strip().split())
+    if not isinstance(name_or_prompt, str):
+        raise ValueError("target name or prompt must be a string")
+    text = _normalize_text(name_or_prompt)
+    if not text:
+        raise ValueError("target name or prompt must be non-empty")
     extra = extra_targets or {}
-    targets = {**TARGETS, **extra}
     for collection in (extra, TARGETS):
-        if text in collection:
-            return collection[text]
-    for collection in (extra, TARGETS):
-        for spec in collection.values():
-            if any(text == alias for alias in spec.aliases):
-                return spec
-    words = set(text.split())
+        exact = _exact_target_match(text, collection)
+        if exact is not None:
+            return exact
+        phrase = _phrase_target_match(text, collection)
+        if phrase is not None:
+            return phrase
+    available = ", ".join(sorted({*TARGETS, *extra}))
+    raise ValueError(f"unknown target '{name_or_prompt}'; available targets: {available}")
+
+
+def _exact_target_match(text: str, targets: dict[str, TargetSpec]) -> TargetSpec | None:
     for key, spec in targets.items():
-        if key in words or any(alias in text for alias in spec.aliases):
+        if text == _normalize_text(key) or any(text == _normalize_text(alias) for alias in spec.aliases):
             return spec
-    safe_name = "_".join(part for part in text.split() if part.isalnum()) or "object"
-    return TargetSpec(safe_name[:32], "box", (0.10, 0.10, 0.10), (0.85, 0.25, 0.25, 1.0), (text,))
+    return None
+
+
+def _phrase_target_match(text: str, targets: dict[str, TargetSpec]) -> TargetSpec | None:
+    words = _word_tokens(text)
+    matches: list[tuple[int, int, TargetSpec]] = []
+    for key, spec in targets.items():
+        for token in (key, spec.name, *spec.aliases):
+            normalized = _normalize_text(token)
+            token_words = _word_tokens(normalized)
+            if token_words and _contains_word_phrase(words, token_words):
+                matches.append((len(token_words), len(normalized), spec))
+    if not matches:
+        return None
+    best_rank = max((word_count, char_count) for word_count, char_count, _ in matches)
+    best_specs = {spec.name: spec for word_count, char_count, spec in matches if (word_count, char_count) == best_rank}
+    if len(best_specs) > 1:
+        raise ValueError(f"ambiguous target prompt '{text}': {', '.join(sorted(best_specs))}")
+    return next(iter(best_specs.values()))
+
+
+def _contains_word_phrase(words: list[str], phrase: list[str]) -> bool:
+    width = len(phrase)
+    return any(words[index : index + width] == phrase for index in range(len(words) - width + 1))
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(value.lower().strip().split())
+
+
+def _word_tokens(value: str) -> list[str]:
+    return re.findall(r"[^\W_]+|_+", value.lower(), flags=re.UNICODE)
 
 
 def base_position(target: TargetSpec) -> np.ndarray:

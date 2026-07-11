@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mujoco-servo"
-version = "0.2.0"
-description = "Self-contained MuJoCo visual-servo tracking demo"
+version = "0.3.0"
+description = "Configurable MuJoCo RGB-D visual-servo simulator with replaceable robots and targets"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
-  "mujoco>=3.1",
+  "mujoco>=3.3.1",
   "opencv-python>=4.8",
 ]
 
 [project.optional-dependencies]
 semantic = [
   "torch>=2.3",
-  "transformers>=4.51",
+  "transformers>=4.51,<5",
   "Pillow>=10",
 ]
 test = [
@@ -34,3 +34,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+extend-exclude = ["vendor"]

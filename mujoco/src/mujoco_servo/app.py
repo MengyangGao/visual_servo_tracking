@@ -3,17 +3,18 @@ from __future__ import annotations
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import cv2
 import mujoco
 import numpy as np
 
-from .config import DemoConfig, resolve_robot, validate_config
-from .control import ResolvedRateController, ServoState, desired_ee_position
+from .config import CameraConfig, DemoConfig, load_robot_specs, resolve_robot, validate_config
+from .control import ResolvedRateController, ServoState, desired_ee_orientation, desired_ee_position
 from .depth import DepthBackend, build_depth_backend
+from .math_utils import vector_alignment_error
 from .perception import CameraIntrinsics, CameraObservation, Detection, PerceptionBackend, build_perception
-from .scene import build_scene, frame_position, set_target_position, site_position
+from .scene import body_position, build_scene, frame_position, set_target_position, site_position
 from .targets import TargetMotion, base_position, load_target_specs, resolve_target
 
 
@@ -39,25 +40,59 @@ class RunSummary:
     mean_camera_render_ms: float
     depth_backend: str
     depth_metric: bool
+    final_target_position: tuple[float, float, float]
+    final_end_effector_position: tuple[float, float, float]
+    final_detected_position: tuple[float, float, float] | None
+    final_detection_anchor: str | None
+    final_orientation_error_rad: float
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass(slots=True)
+class SimulationState:
+    """Public snapshot of positions read from the current MuJoCo state."""
+
+    time_s: float
+    target_position: np.ndarray
+    end_effector_position: np.ndarray
+    camera_position: np.ndarray
+    joint_positions: np.ndarray
+    detected_position: np.ndarray | None
+    detection_backend: str | None
+    detection_anchor: str | None
+    detection_age_s: float | None
+
+    def as_dict(self) -> dict:
+        return {
+            "time_s": self.time_s,
+            "target_position": self.target_position.tolist(),
+            "end_effector_position": self.end_effector_position.tolist(),
+            "camera_position": self.camera_position.tolist(),
+            "joint_positions": self.joint_positions.tolist(),
+            "detected_position": None if self.detected_position is None else self.detected_position.tolist(),
+            "detection_backend": self.detection_backend,
+            "detection_anchor": self.detection_anchor,
+            "detection_age_s": self.detection_age_s,
+        }
 
 
 class VisualServoSimulation:
     def __init__(self, config: DemoConfig) -> None:
         validate_config(config)
         self.config = config
-        self.robot = resolve_robot(config.robot)
+        self.extra_robots = load_robot_specs(config.robot_file) if config.robot_file is not None else {}
+        self.robot = resolve_robot(config.robot, self.extra_robots)
         self.extra_targets = load_target_specs(config.target_file)
         self.target = resolve_target(config.target, self.extra_targets)
-        self._validate_task_target_compatibility()
         self._target_base_position = (
             base_position(self.target)
             if self.target.base_position is not None or self.robot.default_target_position is None
             else np.array(self.robot.default_target_position, dtype=float).reshape(3)
         )
-        self.scene = build_scene(self.target, config.camera, self.robot, target_position=self._target_base_position)
+        self.camera = self._workspace_camera(config.camera, self._target_base_position, self.robot.base_position)
+        self.scene = build_scene(self.target, self.camera, self.robot, target_position=self._target_base_position)
         self.motion = TargetMotion(self.target, config.trajectory, config.seed, base_override=self._target_base_position)
         self.detector_name = config.detector.strip().lower()
         self.perception: PerceptionBackend | None = None
@@ -84,27 +119,99 @@ class VisualServoSimulation:
         self._latest_overlay_rgb: np.ndarray | None = None
         self._overlay_rect_key: tuple[int, int, int, int] | None = None
         self._last_camera_wall_time = -1.0e9
+        self._last_camera_sim_time = -1.0e9
         self._perception_executor: ThreadPoolExecutor | None = None
         self._perception_future: Future[tuple[CameraObservation, Detection]] | None = None
         self._last_detection: Detection | None = None
         self._last_detection_wall_time: float | None = None
+        self._last_detection_sim_time: float | None = None
         self._last_accepted_detection_position: np.ndarray | None = None
+        self._last_accepted_detection: Detection | None = None
+        self._last_accepted_detection_wall_time: float | None = None
+        self._last_accepted_detection_sim_time: float | None = None
         self._perception_disabled = False
         self._control_dt_s = self._substeps * float(self.scene.model.opt.timestep)
         self._camera_render_times_ms: list[float] = []
         self._last_depth_metric = False
 
-    def _validate_task_target_compatibility(self) -> None:
-        task = self.config.controller.task.strip().lower()
-        if task != "contact" or self.robot.max_gripper_width_m is None:
-            return
-        grasp_width = float(self.target.grasp_width_m)
-        max_width = float(self.robot.max_gripper_width_m)
-        if grasp_width > max_width + 1e-9:
-            raise ValueError(
-                f"target '{self.target.name}' grasp width {grasp_width:.3f} m exceeds "
-                f"robot '{self.robot.name}' gripper width {max_width:.3f} m; use standoff or front-standoff"
-            )
+    @staticmethod
+    def _workspace_camera(
+        camera: CameraConfig,
+        target_position: np.ndarray,
+        robot_base_position: np.ndarray | tuple[float, float, float],
+    ) -> CameraConfig:
+        """Frame the selected robot workspace unless a custom pose was supplied."""
+        defaults = CameraConfig()
+        if camera.position != defaults.position or camera.lookat != defaults.lookat:
+            return camera
+        target = np.asarray(target_position, dtype=float).reshape(3)
+        # Look across (rather than along) the base-to-target approach line so
+        # the arm does not hide the target as it reaches the standoff pose.
+        robot_base = np.asarray(robot_base_position, dtype=float).reshape(3)
+        radial = target[:2] - robot_base[:2]
+        radial_norm = float(np.linalg.norm(radial))
+        radial = radial / radial_norm if radial_norm > 1e-9 else np.array([1.0, 0.0])
+        side = np.array([radial[1], -radial[0]], dtype=float)
+        if side[1] > 0.0:
+            side = -side
+        position = target + np.array([1.2 * side[0], 1.2 * side[1], 0.7], dtype=float)
+        return replace(camera, position=tuple(position), lookat=tuple(target))
+
+    def get_state(self) -> SimulationState:
+        """Read a copy of the current simulator and perception state."""
+        model = self.scene.model
+        data = self.scene.data
+        mujoco.mj_forward(model, data)
+        target = site_position(model, data, self.scene.target_site_name)
+        ee = frame_position(
+            model,
+            data,
+            self.scene.ee_frame_type,
+            self.scene.ee_frame_name,
+            self.scene.ee_frame_offset,
+        )
+        camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, self.scene.camera_name)
+        if camera_id < 0:
+            raise KeyError(f"camera '{self.scene.camera_name}' missing")
+        joint_positions = []
+        for joint_name in self.robot.joint_names:
+            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            if joint_id < 0:
+                raise KeyError(f"joint '{joint_name}' missing")
+            joint_positions.append(float(data.qpos[model.jnt_qposadr[joint_id]]))
+        detection = self._last_accepted_detection
+        detection_age = self._perception_age_s()
+        if detection_age is not None and detection_age > self.config.detection_timeout_s:
+            detection = None
+        detected = None
+        if detection is not None and detection.success and detection.target_position is not None:
+            try:
+                candidate = np.asarray(detection.target_position, dtype=float).reshape(3)
+                if np.isfinite(candidate).all():
+                    detected = candidate.copy()
+            except (TypeError, ValueError):
+                detected = None
+        return SimulationState(
+            time_s=float(data.time),
+            target_position=target,
+            end_effector_position=ee,
+            camera_position=np.array(data.cam_xpos[camera_id], dtype=float),
+            joint_positions=np.asarray(joint_positions, dtype=float),
+            detected_position=detected,
+            detection_backend=None if detection is None else detection.backend,
+            detection_anchor=None if detection is None else detection.anchor_type,
+            detection_age_s=detection_age,
+        )
+
+    def get_body_position(self, name: str) -> np.ndarray:
+        """Return a copy of a named MuJoCo body's world position."""
+        mujoco.mj_forward(self.scene.model, self.scene.data)
+        return body_position(self.scene.model, self.scene.data, name)
+
+    def get_site_position(self, name: str) -> np.ndarray:
+        """Return a copy of a named MuJoCo site's world position."""
+        mujoco.mj_forward(self.scene.model, self.scene.data)
+        return site_position(self.scene.model, self.scene.data, name)
 
     def run(self) -> RunSummary:
         viewer = None
@@ -144,7 +251,17 @@ class VisualServoSimulation:
             return None
         render_start = time.perf_counter()
         if self._renderer is None:
-            self._renderer = mujoco.Renderer(self.scene.model, width=self.config.camera.width, height=self.config.camera.height)
+            try:
+                self._renderer = mujoco.Renderer(
+                    self.scene.model,
+                    width=self.camera.width,
+                    height=self.camera.height,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "MuJoCo camera rendering is unavailable. Use a desktop graphics session on macOS "
+                    "or configure EGL/OSMesa for headless Linux; oracle mode does not require rendering."
+                ) from exc
         self._renderer.update_scene(self.scene.data, camera=self.scene.camera_name)
         rgb = self._renderer.render()
         self._renderer.enable_depth_rendering()
@@ -163,15 +280,17 @@ class VisualServoSimulation:
             depth_metric = True
         self._last_depth_metric = depth_metric
         cam_id = mujoco.mj_name2id(self.scene.model, mujoco.mjtObj.mjOBJ_CAMERA, self.scene.camera_name)
+        if cam_id < 0:
+            raise RuntimeError(f"camera '{self.scene.camera_name}' is missing from the MuJoCo model")
         fovy = float(self.scene.model.cam_fovy[cam_id])
-        fy = 0.5 * self.config.camera.height / np.tan(np.deg2rad(fovy) * 0.5)
+        fy = 0.5 * self.camera.height / np.tan(np.deg2rad(fovy) * 0.5)
         intrinsics = CameraIntrinsics(
             fx=fy,
             fy=fy,
-            cx=0.5 * self.config.camera.width,
-            cy=0.5 * self.config.camera.height,
-            width=self.config.camera.width,
-            height=self.config.camera.height,
+            cx=0.5 * (self.camera.width - 1),
+            cy=0.5 * (self.camera.height - 1),
+            width=self.camera.width,
+            height=self.camera.height,
         )
         observation = CameraObservation(
             frame_bgr=frame_bgr,
@@ -180,6 +299,7 @@ class VisualServoSimulation:
             camera_position=np.array(self.scene.data.cam_xpos[cam_id], dtype=float),
             camera_xmat=np.array(self.scene.data.cam_xmat[cam_id], dtype=float).reshape(3, 3),
             wall_time_s=render_start,
+            sim_time_s=float(self.scene.data.time),
             depth_backend=depth_backend,
             depth_metric=depth_metric,
         )
@@ -197,45 +317,73 @@ class VisualServoSimulation:
         rejected_detections = 0
         last_state: ServoState | None = None
         last_observed_target: np.ndarray | None = None
+        last_observed_time_s: float | None = None
         wall_start = time.perf_counter()
         for step in range(self.config.steps):
             if viewer is not None and not viewer.is_running():
                 break
             time_s = float(data.time)
-            target_pos = self._target_position(time_s)
-            set_target_position(model, data, target_pos)
+            requested_target_pos = self._target_position(time_s)
+            set_target_position(model, data, requested_target_pos)
             mujoco.mj_forward(model, data)
+            # Simulator truth is read back from MuJoCo rather than copied from
+            # the trajectory command.  This remains correct for custom target
+            # models whose tracking site is not identical to the mocap input.
+            target_pos = site_position(model, data, self.scene.target_site_name)
 
             detection = self._update_perception(viewer, target_pos)
             if self.detector_name != "oracle" and detection is not None and detection.success and detection.target_position is not None:
                 if self._accept_detection(detection):
-                    last_observed_target = detection.target_position.copy()
-                    self._last_accepted_detection_position = last_observed_target.copy()
-                    perception_updates += 1
+                    detection_time_s = self._last_detection_sim_time
+                    if detection_time_s is None:
+                        detection_time_s = time_s
+                    if time_s - detection_time_s <= self.config.detection_timeout_s:
+                        last_observed_target = detection.target_position.copy()
+                        last_observed_time_s = detection_time_s
+                        self._last_accepted_detection_position = last_observed_target.copy()
+                        self._last_accepted_detection = detection
+                        self._last_accepted_detection_sim_time = detection_time_s
+                        self._last_accepted_detection_wall_time = self._last_detection_wall_time or time.perf_counter()
+                        perception_updates += 1
+                    else:
+                        rejected_detections += 1
                 else:
                     rejected_detections += 1
                     if self.config.debug_perception:
                         print(f"reject detection pos={detection.target_position} bbox={detection.bbox_xyxy} score={detection.score:.3f}")
             hold_command = False
-            if last_observed_target is not None:
+            observation_is_fresh = (
+                last_observed_target is not None
+                and last_observed_time_s is not None
+                and time_s - last_observed_time_s <= self.config.detection_timeout_s
+            )
+            if observation_is_fresh:
                 command_target = last_observed_target
             elif self.detector_name == "oracle":
                 command_target = target_pos
                 oracle_truth_steps += 1
             else:
                 command_target = None
+                last_observed_target = None
+                last_observed_time_s = None
                 hold_command = True
                 hold_steps += 1
             if hold_command:
                 last_state = self.controller.hold(data, time_s, step)
             else:
                 last_state = self.controller.step(data, command_target, time_s, step, self._control_dt_s)
-            eval_desired = desired_ee_position(self.config.controller.task, target_pos, last_state.ee_position, self.config.controller)
+            eval_desired = desired_ee_position(
+                self.config.controller.task,
+                target_pos,
+                last_state.ee_position,
+                self.config.controller,
+                self.robot.base_position,
+            )
             errors.append(float(np.linalg.norm(eval_desired - last_state.ee_position)))
 
             for _ in range(self._substeps):
                 if self.config.manual_control and viewer is not None:
-                    set_target_position(model, data, target_pos)
+                    set_target_position(model, data, requested_target_pos)
                 else:
                     set_target_position(model, data, self._target_position(float(data.time)))
                 mujoco.mj_step(model, data)
@@ -252,15 +400,25 @@ class VisualServoSimulation:
 
         completed_steps = len(errors)
         metric_errors = errors
-        fallback_target_distance = 0.0
+        final_snapshot = self.get_state()
+        final_target_distance = float(
+            np.linalg.norm(final_snapshot.target_position - final_snapshot.end_effector_position)
+        )
+        final_desired = desired_ee_position(
+            self.config.controller.task,
+            final_snapshot.target_position,
+            final_snapshot.end_effector_position,
+            self.config.controller,
+            self.robot.base_position,
+        )
+        final_error = float(np.linalg.norm(final_desired - final_snapshot.end_effector_position))
         if last_state is None:
-            ee = frame_position(model, data, self.scene.ee_frame_type, self.scene.ee_frame_name, self.scene.ee_frame_offset)
-            target = site_position(model, data, self.scene.target_site_name)
-            final_error = float(np.linalg.norm(target - ee))
-            fallback_target_distance = final_error
             metric_errors = [final_error]
-        else:
-            final_error = errors[-1]
+        detected_position = final_snapshot.detected_position
+        final_orientation_error = self._orientation_error(
+            final_snapshot.target_position,
+            final_desired,
+        )
         return RunSummary(
             steps=completed_steps,
             robot=self.robot.name,
@@ -269,7 +427,7 @@ class VisualServoSimulation:
             trajectory=self.config.trajectory,
             detector=self.detector_name,
             final_error_m=float(final_error),
-            final_target_distance_m=float(last_state.target_distance_m if last_state is not None else fallback_target_distance),
+            final_target_distance_m=final_target_distance,
             mean_error_m=float(np.mean(metric_errors)),
             min_error_m=float(np.min(metric_errors)),
             max_error_m=float(np.max(metric_errors)),
@@ -282,7 +440,20 @@ class VisualServoSimulation:
             mean_camera_render_ms=float(np.mean(self._camera_render_times_ms)) if self._camera_render_times_ms else 0.0,
             depth_backend=self.depth_backend.name,
             depth_metric=self._last_depth_metric,
+            final_target_position=tuple(float(value) for value in final_snapshot.target_position),
+            final_end_effector_position=tuple(float(value) for value in final_snapshot.end_effector_position),
+            final_detected_position=None if detected_position is None else tuple(float(value) for value in detected_position),
+            final_detection_anchor=final_snapshot.detection_anchor,
+            final_orientation_error_rad=final_orientation_error,
         )
+
+    def _orientation_error(self, target_position: np.ndarray, desired_position: np.ndarray) -> float:
+        desired_rotation = desired_ee_orientation(self.config.controller.task, target_position, desired_position)
+        if desired_rotation is None:
+            return 0.0
+        current_rotation = self.controller.frame_rotation(self.scene.data)
+        current_axis = current_rotation @ np.asarray(self.robot.tool_axis, dtype=float)
+        return float(np.linalg.norm(vector_alignment_error(current_axis, desired_rotation[:, 2])))
 
     def _uses_async_perception(self, viewer) -> bool:
         if viewer is None or self.detector_name == "oracle":
@@ -291,14 +462,14 @@ class VisualServoSimulation:
         return sys.platform != "darwin"
 
     def _should_lazy_load_perception(self) -> bool:
-        return False
+        return self.detector_name == "semantic"
 
     def _prepare_perception_for_run(self, viewer) -> None:
-        if self.detector_name != "semantic" or self.perception is None:
+        if self.detector_name != "semantic":
             return
         if viewer is not None:
             mode = "asynchronously" if self._uses_async_perception(viewer) else "on the main thread"
-            print(f"semantic models loaded; inference will run {mode}")
+            print(f"semantic models will load on first use; inference will run {mode}")
 
     def _ensure_perception(self) -> PerceptionBackend:
         if self.perception is None:
@@ -308,16 +479,24 @@ class VisualServoSimulation:
     def _update_perception(self, viewer, truth_position: np.ndarray) -> Detection | None:
         perception = self._ensure_perception() if not self._uses_async_perception(viewer) else None
         if self.detector_name == "oracle":
-            return perception.detect(None, truth_position, self.target, self.config.target)
+            detection = perception.detect(None, truth_position, self.target, self._perception_prompt())
+            self._last_detection = detection
+            self._last_accepted_detection = detection
+            self._last_accepted_detection_position = truth_position.copy()
+            self._last_detection_sim_time = float(self.scene.data.time)
+            self._last_accepted_detection_sim_time = self._last_detection_sim_time
+            self._last_accepted_detection_wall_time = time.perf_counter()
+            return detection
         if self._uses_async_perception(viewer):
             return self._update_async_perception(truth_position)
-        if viewer is not None and not self._should_sample_camera_now():
+        if not self._should_sample_camera_now(simulation_time=viewer is None):
             return None
         observation = self._render_camera_observation()
         observation = self._resolve_observation_depth(observation)
-        detection = perception.detect(observation, truth_position, self.target, self.config.target)
+        detection = perception.detect(observation, truth_position, self.target, self._perception_prompt())
         self._debug_detection(detection, observation, truth_position)
         self._last_detection = detection
+        self._last_detection_sim_time = None if observation is None else float(observation.sim_time_s)
         if detection.success:
             self._last_detection_wall_time = observation.wall_time_s if observation is not None and observation.wall_time_s else time.perf_counter()
         self._latest_overlay_bgr = self._draw_camera_overlay(observation, detection, False)
@@ -325,10 +504,13 @@ class VisualServoSimulation:
         return detection
 
     def _update_async_perception(self, truth_position: np.ndarray) -> Detection | None:
+        completed_detection: Detection | None = None
         if self._perception_future is not None and self._perception_future.done():
             try:
                 observation, detection = self._perception_future.result()
                 self._last_detection = detection
+                self._last_detection_sim_time = float(observation.sim_time_s)
+                completed_detection = detection
                 if detection.success:
                     self._last_detection_wall_time = observation.wall_time_s or time.perf_counter()
                 self._latest_overlay_bgr = self._draw_camera_overlay(observation, detection, False)
@@ -336,11 +518,12 @@ class VisualServoSimulation:
             except Exception as exc:
                 self._perception_disabled = True
                 self._last_detection = Detection(False, self.detector_name, None)
+                completed_detection = self._last_detection
                 print(f"perception worker failed: {exc}", file=sys.stderr)
             finally:
                 self._perception_future = None
         if self._perception_disabled:
-            return self._last_detection
+            return completed_detection
         now = time.perf_counter()
         should_sample = self._perception_future is None and self._should_sample_camera_now(now)
         if should_sample:
@@ -349,24 +532,35 @@ class VisualServoSimulation:
             self._latest_overlay_bgr = self._draw_camera_overlay(observation, None, True)
             self._latest_overlay_rgb = None
             if self._perception_executor is not None:
-                prompt = self.config.target
+                prompt = self._perception_prompt()
                 target = self.target
                 truth = truth_position.copy()
                 self._perception_future = self._perception_executor.submit(self._detect_in_worker, observation, truth, target, prompt)
-        return self._last_detection
+        return completed_detection
 
-    def _should_sample_camera_now(self, now: float | None = None) -> bool:
-        now = time.perf_counter() if now is None else now
-        camera_period = 1.0 / max(0.5, float(self.config.camera_fps))
-        if now - self._last_camera_wall_time < camera_period:
+    def _perception_prompt(self) -> str:
+        return self.config.perception_prompt or self.target.name
+
+    def _should_sample_camera_now(self, now: float | None = None, *, simulation_time: bool = False) -> bool:
+        camera_period = 1.0 / float(self.config.camera_fps)
+        if simulation_time:
+            sample_time = float(self.scene.data.time) if now is None else float(now)
+            if sample_time - self._last_camera_sim_time < camera_period:
+                return False
+            self._last_camera_sim_time = sample_time
+            return True
+        sample_time = time.perf_counter() if now is None else float(now)
+        if sample_time - self._last_camera_wall_time < camera_period:
             return False
-        self._last_camera_wall_time = now
+        self._last_camera_wall_time = sample_time
         return True
 
     def _perception_age_s(self) -> float | None:
-        if self._last_detection_wall_time is None:
-            return None
-        return max(0.0, time.perf_counter() - self._last_detection_wall_time)
+        if self._last_accepted_detection_sim_time is not None:
+            return max(0.0, float(self.scene.data.time) - self._last_accepted_detection_sim_time)
+        if self._last_accepted_detection_wall_time is not None:
+            return max(0.0, time.perf_counter() - self._last_accepted_detection_wall_time)
+        return None
 
     def _accept_detection(self, detection: Detection) -> bool:
         if detection.target_position is None:
@@ -378,8 +572,11 @@ class VisualServoSimulation:
         if not np.isfinite(position).all():
             return False
         if self.robot.detection_bounds is None:
-            lower = np.array([0.05, -0.55, 0.05], dtype=float)
-            upper = np.array([0.85, 0.55, 0.85], dtype=float)
+            # Custom robot descriptors may omit workspace bounds.  Avoid
+            # silently imposing Panda coordinates while still rejecting
+            # clearly nonsensical world estimates.
+            lower = np.full(3, -5.0, dtype=float)
+            upper = np.full(3, 5.0, dtype=float)
         else:
             lower = np.array(self.robot.detection_bounds[0], dtype=float).reshape(3)
             upper = np.array(self.robot.detection_bounds[1], dtype=float).reshape(3)
@@ -428,6 +625,7 @@ class VisualServoSimulation:
             camera_position=observation.camera_position,
             camera_xmat=observation.camera_xmat,
             wall_time_s=observation.wall_time_s,
+            sim_time_s=observation.sim_time_s,
             depth_backend=depth.backend,
             depth_metric=depth.metric,
         )
@@ -435,7 +633,11 @@ class VisualServoSimulation:
     def _target_position(self, time_s: float) -> np.ndarray:
         if self.config.manual_control:
             self._integrate_manual_target_velocity(time_s)
-            return self.motion.position(time_s) + self._manual_target_offset
+            position = self.motion.position(time_s) + self._manual_target_offset
+            if self.robot.detection_bounds is not None:
+                lower, upper = self.robot.detection_bounds
+                position = np.clip(position, np.asarray(lower, dtype=float), np.asarray(upper, dtype=float))
+            return position
         return self.motion.position(time_s)
 
     def _integrate_manual_target_velocity(self, time_s: float) -> None:
@@ -570,11 +772,13 @@ class VisualServoSimulation:
     def _update_viewer_overlay(self, viewer) -> None:
         if not self.config.camera_overlay or self._latest_overlay_bgr is None:
             return
+        if not hasattr(viewer, "viewport") or not callable(getattr(viewer, "set_images", None)):
+            return
         viewport = viewer.viewport
         if viewport is None or viewport.width <= 0 or viewport.height <= 0:
             return
         width = min(640, max(300, int(viewport.width * self.config.overlay_width_fraction)))
-        height = int(width * self.config.camera.height / self.config.camera.width)
+        height = int(width * self.camera.height / self.camera.width)
         height = min(height, max(180, int(viewport.height * 0.46)))
         x = max(0, int(viewport.width - width - 12))
         y = max(0, int(viewport.height - height - 12))

@@ -6,8 +6,8 @@ import mujoco
 import numpy as np
 
 from .config import ControllerConfig, RobotSpec
-from .math_utils import clamp_norm, damped_pseudo_inverse, normalize, rotation_error_vector, tool_z_facing_rotation
-from .scene import frame_position
+from .math_utils import clamp_norm, damped_pseudo_inverse, normalize, tool_z_facing_rotation, vector_alignment_error
+from .scene import frame_position, resolve_joint_actuator, resolve_passive_actuator
 
 
 @dataclass(slots=True)
@@ -23,7 +23,13 @@ class ServoState:
     qpos_command: np.ndarray
 
 
-def desired_ee_position(task: str, target_position: np.ndarray, ee_position: np.ndarray, config: ControllerConfig) -> np.ndarray:
+def desired_ee_position(
+    task: str,
+    target_position: np.ndarray,
+    ee_position: np.ndarray,
+    config: ControllerConfig,
+    front_origin: np.ndarray | tuple[float, float, float] | None = None,
+) -> np.ndarray:
     target = np.asarray(target_position, dtype=float).reshape(3)
     ee = np.asarray(ee_position, dtype=float).reshape(3)
     mode = task.strip().lower()
@@ -33,7 +39,8 @@ def desired_ee_position(task: str, target_position: np.ndarray, ee_position: np.
         direction = normalize(ee - target, np.array([-1.0, 0.0, 0.0]))
         return target + direction * float(config.standoff_m)
     if mode == "front-standoff":
-        horizontal = np.array([target[0], target[1], 0.0], dtype=float)
+        origin = np.zeros(3, dtype=float) if front_origin is None else np.asarray(front_origin, dtype=float).reshape(3)
+        horizontal = np.array([target[0] - origin[0], target[1] - origin[1], 0.0], dtype=float)
         direction = normalize(horizontal, np.array([1.0, 0.0, 0.0]))
         desired = target - direction * float(config.standoff_m)
         desired[2] = target[2]
@@ -77,8 +84,10 @@ class ResolvedRateController:
             missing = [name for name, joint_id in zip(robot.joint_names, self._joint_ids) if joint_id < 0]
             raise RuntimeError(f"robot '{robot.name}' missing joints: {', '.join(missing)}")
         self._actuator_ids = [self._actuator_id_for_joint(name, i) for i, name in enumerate(robot.joint_names)]
+        self._actuator_gears = np.array([model.actuator_gear[actuator_id, 0] for actuator_id in self._actuator_ids], dtype=float)
         self._passive_actuator_ids = tuple(
-            (self._resolve_actuator(name), float(value)) for name, value in robot.passive_actuator_ctrl
+            (resolve_passive_actuator(model, robot, name, value), float(value))
+            for name, value in robot.passive_actuator_ctrl
         )
         self._qpos_adr = np.array([model.jnt_qposadr[joint_id] for joint_id in self._joint_ids], dtype=int)
         self._dof_adr = np.array([model.jnt_dofadr[joint_id] for joint_id in self._joint_ids], dtype=int)
@@ -109,7 +118,7 @@ class ResolvedRateController:
         current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
         self._qpos_command = current_qpos.copy()
         for i, actuator_id in enumerate(self._actuator_ids):
-            self._write_ctrl(data, actuator_id, self._qpos_command[i])
+            self._write_ctrl(data, actuator_id, self._actuator_gears[i] * self._qpos_command[i])
         for actuator_id, value in self._passive_actuator_ids:
             self._write_ctrl(data, actuator_id, value)
         return ServoState(
@@ -133,7 +142,13 @@ class ResolvedRateController:
             self._filtered_target = (1.0 - alpha) * self._filtered_target + alpha * target
 
         ee_pos = frame_position(self.model, data, self.ee_frame_type, self.ee_frame_name, self.ee_frame_offset)
-        desired = desired_ee_position(self.config.task, self._filtered_target, ee_pos, self.config)
+        desired = desired_ee_position(
+            self.config.task,
+            self._filtered_target,
+            ee_pos,
+            self.config,
+            self.robot.base_position,
+        )
         error = desired - ee_pos
         ee_velocity = clamp_norm(float(self.config.position_gain) * error, self.config.max_ee_speed)
         desired_rotation = desired_ee_orientation(self.config.task, self._filtered_target, desired)
@@ -147,26 +162,38 @@ class ResolvedRateController:
         else:
             mujoco.mj_jacBody(self.model, data, jacp, jacr, self._frame_id)
         orientation_error = np.zeros(3, dtype=float)
+        position_jac = jacp[:, self._dof_adr]
+        primary_inverse = damped_pseudo_inverse(position_jac, self.config.damping)
+        qvel = primary_inverse @ ee_velocity
+        # Use an undamped Moore-Penrose projector for task hierarchy.  A
+        # projector built from the damped inverse is not a true null-space
+        # projector; secondary orientation/posture commands then leak into the
+        # position task and make an otherwise converged end effector drift.
+        primary_nullspace = np.eye(len(self._joint_ids)) - np.linalg.pinv(position_jac, rcond=1e-5) @ position_jac
+        posture_nullspace = primary_nullspace
         if desired_rotation is not None:
-            current_rotation = self._frame_rotation(data)
-            orientation_error = rotation_error_vector(desired_rotation, current_rotation)
+            current_rotation = self.frame_rotation(data)
+            # Front tracking constrains the tool approach axis, not roll about
+            # that axis.  Treating it as a full 3-DoF orientation task wastes a
+            # degree of freedom and can pull the Cartesian position away from
+            # an already converged standoff pose.
+            current_tool_axis = current_rotation @ np.asarray(self.robot.tool_axis, dtype=float)
+            orientation_error = vector_alignment_error(current_tool_axis, desired_rotation[:, 2])
             angular_velocity = clamp_norm(self.config.orientation_gain * orientation_error, self.config.max_angular_speed)
-            task_jac = jacp[:, self._dof_adr]
-            qvel = damped_pseudo_inverse(task_jac, self.config.damping) @ ee_velocity
-            nullspace = np.eye(len(self._joint_ids)) - damped_pseudo_inverse(task_jac, self.config.damping) @ task_jac
-            orientation_jac = jacr[:, self._dof_adr]
-            correction_jac = orientation_jac @ nullspace
+            # Rotation around the tool axis does not change the facing
+            # direction, so remove that unobservable row-space component.
+            axis_projector = np.eye(3) - np.outer(current_tool_axis, current_tool_axis)
+            orientation_jac = axis_projector @ jacr[:, self._dof_adr]
+            correction_jac = orientation_jac @ primary_nullspace
             correction = damped_pseudo_inverse(correction_jac, self.config.damping) @ (angular_velocity - orientation_jac @ qvel)
-            qvel = qvel + 0.15 * (nullspace @ correction)
-        else:
-            task_jac = jacp[:, self._dof_adr]
-            task_velocity = ee_velocity
-            qvel = damped_pseudo_inverse(task_jac, self.config.damping) @ task_velocity
+            position_gate = float(np.clip(1.0 - np.linalg.norm(error) / 0.025, 0.0, 1.0))
+            qvel = qvel + (0.30 * position_gate) * (primary_nullspace @ correction)
+            stacked_jac = np.vstack([position_jac, orientation_jac])
+            posture_nullspace = np.eye(len(self._joint_ids)) - np.linalg.pinv(stacked_jac, rcond=1e-5) @ stacked_jac
 
         home_error = self._qpos_home - np.asarray(data.qpos[self._qpos_adr], dtype=float)
-        nullspace = np.eye(len(self._joint_ids)) - damped_pseudo_inverse(task_jac, self.config.damping) @ task_jac
         home_gain = 0.03 if desired_rotation is not None else 0.18
-        qvel = qvel + home_gain * (nullspace @ home_error)
+        qvel = qvel + home_gain * (posture_nullspace @ home_error)
         qvel = clamp_norm(qvel, self.config.max_joint_speed)
         if not np.isfinite(qvel).all():
             qvel = np.zeros_like(qvel)
@@ -176,13 +203,13 @@ class ResolvedRateController:
             raise ValueError("controller dt must be positive and finite")
         current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
         self._qpos_command = self._qpos_command + qvel * dt_s
-        self._qpos_command = np.clip(self._qpos_command, current_qpos - 0.22, current_qpos + 0.22)
+        self._qpos_command = np.clip(self._qpos_command, current_qpos - 0.08, current_qpos + 0.08)
         for i, joint_id in enumerate(self._joint_ids):
             if self.model.jnt_limited[joint_id]:
                 lo, hi = self.model.jnt_range[joint_id]
                 self._qpos_command[i] = np.clip(self._qpos_command[i], lo + 1e-4, hi - 1e-4)
         for i, actuator_id in enumerate(self._actuator_ids):
-            self._write_ctrl(data, actuator_id, self._qpos_command[i])
+            self._write_ctrl(data, actuator_id, self._actuator_gears[i] * self._qpos_command[i])
         for actuator_id, value in self._passive_actuator_ids:
             self._write_ctrl(data, actuator_id, value)
 
@@ -198,27 +225,13 @@ class ResolvedRateController:
             qpos_command=self._qpos_command.copy(),
         )
 
-    def _frame_rotation(self, data: mujoco.MjData) -> np.ndarray:
+    def frame_rotation(self, data: mujoco.MjData) -> np.ndarray:
         if self.ee_frame_type == "site":
             return np.array(data.site_xmat[self._frame_id], dtype=float).reshape(3, 3)
         return np.array(data.xmat[self._frame_id], dtype=float).reshape(3, 3)
 
-    def _resolve_actuator(self, actuator_name: str) -> int:
-        actuator_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
-        if actuator_id < 0:
-            raise RuntimeError(f"robot '{self.robot.name}' actuator '{actuator_name}' not found")
-        return int(actuator_id)
-
     def _actuator_id_for_joint(self, joint_name: str, index: int) -> int:
-        if index < len(self.robot.actuator_names):
-            actuator_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, self.robot.actuator_names[index])
-            if actuator_id >= 0:
-                return int(actuator_id)
-        joint_id = self._joint_ids[index]
-        for actuator_id in range(self.model.nu):
-            if int(self.model.actuator_trnid[actuator_id, 0]) == joint_id:
-                return actuator_id
-        raise RuntimeError(f"robot '{self.robot.name}' actuator for joint '{joint_name}' not found")
+        return resolve_joint_actuator(self.model, self.robot, joint_name, index)
 
     def _write_ctrl(self, data: mujoco.MjData, actuator_id: int, value: float) -> None:
         ctrl = float(value)

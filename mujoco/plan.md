@@ -1,173 +1,145 @@
-# Objective
+# MuJoCo visual-servo implementation status
 
-Rebuild the `mujoco/` project into a clean MuJoCo visual-servo simulation: a virtual camera observes a modular target object, and a Panda-like 7-DoF robot end-effector smoothly tracks the moving target.
+## Scope
 
-Update: replace the procedural fallback robot as the default with Google DeepMind's official MuJoCo Menagerie Franka Emika Panda model, kept as a git submodule.
+`mujoco/` is the active project. The MATLAB implementation is frozen historical work and is not part of this plan's implementation or acceptance scope.
 
-Update 2: remove the procedural arm fallback entirely, make Menagerie Panda mandatory, add camera-derived semantic perception, expand word-addressable target objects, and add a horizontal front standoff task with CLI distance control.
+The current objective is a configurable MuJoCo RGB-D visual-servo simulator that can:
 
-Update 3: refine viewer interaction by unlocking the camera, hiding perturb visualization by default, adding toggleable mouse target drag, making keyboard target motion continuous, improving initial Panda pose, and throttling semantic perception.
+1. expose simulator positions;
+2. track controlled targets by color;
+3. track open-vocabulary targets with optional semantic models;
+4. replace the robot through validated model descriptors;
+5. replace the visual target through validated primitive, compound, or mesh descriptors.
 
-Update 4: change semantic perception to Grounding DINO + SAM initialization followed by local mask/color/depth tracking, add a viewer camera overlay, and begin removing conflicting viewer shortcuts.
+The default demo is `panda + cup + color + MuJoCo metric depth + front-standoff`.
 
-Update 5: remove perception and camera overlay work from the main viewer hot path, enlarge the overlay, and repair target keyboard/mouse interaction so controls do not induce frame stalls.
+## Implemented
 
-Update 6: avoid MuJoCo viewer shortcut conflicts, keep the main viewer in free-camera mode, initialize mouse perturb only once per drag session, and use a non-blocking target prediction while semantic perception warms up.
+### Simulator state
 
-Update 7: fix MuJoCo overlay coordinate origin, move vertical target controls from `Z`/`X` to `,`/`.`, and add regression coverage for overlay placement.
+- `VisualServoSimulation.get_state()` returns simulator time, target, end-effector, camera, joints, and last detection state.
+- `get_body_position(name)` and `get_site_position(name)` expose named MuJoCo world positions.
+- `RunSummary` includes final truth target, EE, detected position, detection anchor, target distance, task error, and orientation error.
+- Oracle truth is read back from `target_site`; it is not copied directly from the trajectory command.
 
-Update 8: remove the failed mouse/perturb drag path, keep standard MuJoCo mouse camera controls only, simplify manual target control to keyboard offsets, and replace stale root README instructions with current MuJoCo usage.
+### Perception and depth
 
-# User Value
+- `color` is the default lightweight backend and segments the configured target color from rendered RGB.
+- `semantic` lazily loads Grounding DINO and SAM, then reuses a local mask/color/depth tracker between redetections.
+- `oracle` reports the simulated target center and is reserved for controller/debug acceptance.
+- Color and semantic backends estimate a visible RGB-D surface anchor.
+- MuJoCo metric depth is the default. Depth Anything V2 is optional and can attempt metric calibration from a MuJoCo hint.
+- Non-metric depth does not produce a control target.
+- Camera sampling is throttled in viewer and headless modes.
+- A configurable detection timeout discards stale visual targets and causes joint hold; non-oracle modes do not fall back to simulator truth.
 
-- Run a direct demo with `python scripts/demo.py` or `mjpython scripts/demo.py`.
-- See a convincing, smooth visual-servo tracking loop in MuJoCo.
-- Switch target objects, target motion, perception backend, and servo task mode without rewriting code.
-- Keep the core implementation independent from macOS viewer details.
+### Controller and tasks
 
-# Constraints
+- Resolved-rate Cartesian position control uses damped pseudoinverses, joint/EE speed limits, joint-limit clamping, and a null-space home posture.
+- `front-standoff` is the default task and aligns the robot descriptor's local `tool_axis` toward the target while maintaining horizontal distance.
+- `contact`, general `standoff`, and `align-x/y/z` remain available.
+- The controller accepts named scalar hinge/slide joints and joint-position actuator commands.
 
-- Only use and modify content under `mujoco/`.
-- Use the existing conda environment named `visual_servo`.
-- The user explicitly allowed deleting/replacing `src`, `tests`, and `pyproject.toml`.
-- Must support Python 3.10 because `visual_servo` is Python 3.10.
-- Use MuJoCo Menagerie as the required robot model source.
-- Remove the procedural arm fallback so there is a single robot source of truth.
-- [ASSUMPTION] Adding `.gitmodules` at the repository root is acceptable because git submodules require it, even though runtime code remains under `mujoco/`.
-- Keep push/PR out of scope unless the user explicitly approves later.
+### Robot replacement
 
-# Assumptions
+- Built-ins: Menagerie Panda, UR5e, and Lite6.
+- `MUJOCO_MENAGERIE_PATH` overrides the source-tree Menagerie root.
+- `--robot-file` accepts a strict JSON robot object, list, or `{"robots": [...]}` wrapper.
+- Relative XML and asset paths resolve from the descriptor.
+- The loader validates required/unknown fields, lengths, duplicates, finite values, paths, EE frame type, passive controls, workspace bounds, optional world base position, and non-zero normalized tool axis.
+- Custom names and aliases take priority over built-ins.
+- Scene injection rejects MJCF `<include>` and requires a self-contained `<mujoco>` root.
 
-- [ASSUMPTION] The submodule path should be `mujoco/vendor/mujoco_menagerie` so all model assets stay under `mujoco/`.
-- [ASSUMPTION] For camera-based semantic perception, the command loop may use rendered RGB-D from the fixed MuJoCo camera to estimate 3D target position from masks/bounding boxes.
-- [ASSUMPTION] "EE horizontal and facing the object at x cm" means the gripper tool axis points horizontally toward the target, with the EE placed `x` centimeters away from the target along the horizontal line from robot base to object.
-- [ASSUMPTION] MuJoCo viewer mouse camera control should remain the default; target mouse dragging should be explicitly toggled so it does not steal camera interaction.
-- [ASSUMPTION] The default high-quality demo should use oracle/simulation perception for stable closed-loop behavior, with image-based color segmentation available as a lightweight detector.
-- [ASSUMPTION] Advanced semantic backends such as Grounding DINO / SAM2 should be represented by a pluggable interface and optional dependency path, not required for the base demo.
-- [ASSUMPTION] The first acceptance target is contact tracking: the EE center converges to the target center with a small configurable radius.
+### Target replacement
 
-# Affected Files
+- Built-in primitive and compound target library with strict name/phrase resolution.
+- `--target-file` accepts a strict list or `{"targets": [...]}` wrapper.
+- Supported target geometry: box, sphere, cylinder, capsule, compound parts, and external OBJ/STL mesh targets or parts.
+- Relative mesh paths resolve from the target descriptor; dimensions, scales, colors, quaternions, duplicates, and unknown fields are validated.
+- `--prompt` separates semantic wording from selected simulated geometry.
 
-- `mujoco/pyproject.toml`
-- `mujoco/scripts/demo.py`
-- `mujoco/src/mujoco_servo/*`
-- `mujoco/tests/*`
-- `mujoco/plan.md`
-- `mujoco/vendor/mujoco_menagerie`
-- `.gitmodules`
+### Runtime and viewer
 
-# Steps
+- Robot-workspace-aware side framing for a world-fixed RGB-D camera, plus a passive MuJoCo viewer; an explicit non-default `CameraConfig` pose is preserved.
+- Top-right overlay displays RGB, mask, box, centroid, backend, anchor, score, prompt label, and depth status.
+- Standard viewer camera mouse controls remain intact.
+- Arrow/comma/period keyboard target motion is workspace-clamped when robot bounds are available.
+- macOS viewer launch is supported through `mjpython`; other platforms use standard Python.
 
-1. Replace the current package with a compact modular architecture:
-   - config/dataclasses
-   - target library and trajectories
-   - scene generation
-   - perception backends
-   - resolved-rate controller
-   - simulation app/runtime
-2. Build a self-contained MJCF scene:
-   - procedural 7-DoF arm with position actuators
-   - mocap target object
-   - fixed virtual camera and visible camera marker
-   - EE and target sites for measurements
-3. Implement task modes:
-   - `contact` default
-   - `standoff`
-   - `align-x`
-   - `align-y`
-   - `align-z`
-4. Implement target motion modes:
-   - static
-   - circle
-   - figure-eight
-   - random walk
-   - scripted waypoints
-5. Implement perception:
-   - oracle pose backend for stable simulation truth
-   - color segmentation backend from rendered camera images
-   - optional semantic backend stub with clear dependency error
-6. Add `scripts/demo.py` CLI:
-   - runs headless for tests
-   - launches MuJoCo passive viewer when requested
-   - prints final metrics
-7. Add tests for scene construction, trajectories, task goals, controller convergence smoke, and detector behavior.
-8. Validate with the `visual_servo` conda env.
-9. Add MuJoCo Menagerie as a submodule at `mujoco/vendor/mujoco_menagerie`.
-10. Load `franka_emika_panda/scene.xml` by default and inject the target, camera, and tracking sites.
-11. Keep the procedural scene builder as fallback for missing submodule/assets.
-12. Extend tests to assert the Menagerie Panda path is used when present.
-13. Remove all procedural arm generation code and fail fast if the Menagerie submodule is missing.
-14. Expand target library to include primitive and compound target bodies addressed by free-form words.
-15. Add camera observation plumbing: rendered RGB, rendered depth, intrinsics, and camera pose.
-16. Implement semantic perception using Grounding DINO for open-vocabulary boxes and SAM-compatible mask extraction when optional dependencies are installed.
-17. Add `front-standoff` task mode with CLI distance in centimeters and 6D pose control.
-18. Disable per-frame viewer camera rewrites and only set initial camera once.
-19. Keep MuJoCo viewer mouse controls reserved for normal camera orbit/pan/zoom.
-20. Replace discrete WASD/QE target nudges with continuous arrow/PageUp/PageDown velocity control.
-21. Move the Panda start pose higher and away from the object approach path.
-22. Set semantic device selection to auto and throttle expensive Grounding DINO + SAM inference.
-23. Replace periodic semantic inference with one successful Grounding DINO + SAM initialization and per-frame local tracker reuse.
-24. Draw the robot camera stream into a top-right viewer overlay with mask, bbox, centroid, backend, score, and target label.
-25. Avoid PageUp/PageDown and later avoid `[`/`]` because those collide with MuJoCo viewer camera shortcuts.
-26. For interactive viewer runs, sample the robot camera at a low configurable FPS and run perception on a background worker so heavy semantic inference cannot block `viewer.sync()`.
-27. Cache the overlay image and update it only when a fresh camera frame or viewport size change arrives.
-28. Remove the unreliable mouse target-dragging implementation and its perturb state.
-29. Change continuous key motion to a persistent target velocity with no per-repeat allocations; pressing the same key toggles that axis off.
-30. Replace `[`/`]` target controls because MuJoCo uses them for fixed-camera cycling.
-31. Force the viewer camera type back to free camera if a built-in key switches it to a fixed camera, without rewriting azimuth/elevation/lookat.
-32. Initialize MuJoCo perturb once when drag mode is enabled, then let the viewer mouse interaction update the mocap body.
-33. During async semantic warmup, servo toward the predicted/simulated target pose instead of holding the EE stationary until the first detection arrives.
-34. Place the overlay using MuJoCo's bottom-left image coordinate origin: top-right means `y = viewport.height - overlay.height - margin`.
-35. Replace `Z`/`X` vertical controls with `,`/`.` as requested and keep direction mapping explicit: comma down, period up.
-36. Rename manual target control config to keyboard/manual offsets and make `--scripted-target` disable those offsets.
-37. Replace stale README commands and backend names with the current `mujoco/scripts/demo.py` interface.
+### Packaging and tests
 
-# Validation
+- Package version: `0.3.0`, Python `>=3.10`.
+- Base dependencies contain MuJoCo, NumPy, and OpenCV.
+- `test` extra installs pytest; `semantic` adds PyTorch, Pillow, and Transformers 4.x.
+- Tests cover configuration validation, descriptor parsing, scene/model replacement, target schemas, position APIs, control behavior, perception/depth units, CLI errors, and runtime smoke paths.
 
-- `conda run -n visual_servo python --version`
-- `conda run -n visual_servo python -m pip install -e mujoco`
-- `conda run -n visual_servo pytest mujoco/tests`
-- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 240 --target cup --trajectory circle --task contact`
-- `git submodule status mujoco/vendor/mujoco_menagerie`
-- `conda run -n visual_servo python -m py_compile mujoco/src/mujoco_servo/app.py mujoco/src/mujoco_servo/cli.py mujoco/src/mujoco_servo/config.py mujoco/src/mujoco_servo/perception.py`
-- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 12 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
-- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target cup --trajectory static --task contact --detector color --no-realtime`
-- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 60 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
-- `conda run -n visual_servo python mujoco/scripts/demo.py --headless --steps 120 --target apple --trajectory static --task front-standoff --standoff-cm 10 --detector semantic --no-realtime`
-- Unit test for overlay rectangle coordinates against a fake viewer viewport.
-- Unit test that scripted target mode ignores keyboard offsets.
+## Acceptance commands
 
-# Overlooked Risks Or Edge Cases
+From the repository root:
 
-1. macOS MuJoCo rendering may require `mjpython`; the runtime must still work headless without viewer rendering.
-2. A procedural arm may have singularities or unreachable target poses; the controller needs damping, velocity limits, and workspace clamping.
-3. Color segmentation can fail when lighting/background changes; oracle must remain the default for a reliable demo and tests.
-4. Menagerie Panda joint/body/site names differ from the procedural model, so controller discovery must be name-based and tested.
-5. Injecting custom world objects into an included Menagerie scene can conflict with duplicate worldbody/default/asset declarations; use a wrapper MJCF include instead of editing upstream XML.
-6. Menagerie actuator types/ranges may differ from the fallback model, so commands must map to named Panda actuators rather than assuming actuator order.
-7. Grounding DINO/SAM downloads are large and may be slow on first run; tests should validate wiring without requiring model weights.
-8. Depth unprojection depends on MuJoCo camera conventions; validate with color detector smoke tests against oracle behavior.
-9. Passive viewer key callbacks do not expose key release events, so continuous target motion uses short velocity holds refreshed by key repeat.
-10. MuJoCo mouse input remains assigned to the viewer camera; target manipulation is keyboard-only.
-11. Semantic local tracking can drift if another object with a similar HSV profile enters the ROI; failed/degraded masks should fall back to Grounding DINO + SAM reinitialization.
-12. Viewer image overlay support depends on MuJoCo Python viewer versions that expose `Handle.set_images`; validated locally against MuJoCo 3.8.0.
-13. The viewer overlay is not visible in headless validation, so manual `mjpython` GUI smoke testing remains useful for layout and interaction feel.
-14. MuJoCo rendering should remain on the main thread; the async worker receives copied RGB-D arrays and never touches `MjData`.
-15. If semantic model loading itself is slow, the viewer may still start after construction unless backend loading is fully lazy; the critical runtime fix is to keep inference off the viewer loop.
-16. Viewer perturb APIs varied enough across runs that the perturb-based target dragging path was removed.
-17. Viewer built-in shortcuts can still consume or act on keys even when `key_callback` is registered; avoid known built-ins rather than relying on callback consumption.
-18. Using simulated target prediction during semantic warmup is a pragmatic demo bootstrap, but the loop switches to visual detections as soon as they are available.
+```bash
+git submodule update --init --recursive mujoco/vendor/mujoco_menagerie
 
-# Risks
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e "mujoco[test]"
+python -m pytest mujoco/tests
+```
 
-- Menagerie is a larger git submodule and increases checkout/update time.
-- The robot model now requires the Menagerie submodule to be initialized.
-- Semantic perception quality depends on optional model availability and local hardware.
-- Installing MuJoCo/OpenCV into `visual_servo` may require network access.
-- Passive viewer validation may need a local GUI run with `mjpython` on macOS.
+Display-independent controller and position smoke test:
 
-# Rollback Notes
+```bash
+python mujoco/scripts/demo.py \
+  --headless \
+  --detector oracle \
+  --robot panda \
+  --target cup \
+  --trajectory static \
+  --steps 240 \
+  --no-realtime
+```
 
-- All changes are under `mujoco/`.
-- If needed, restore prior content from git history.
-- No git push or PR will be created without explicit approval.
+Color integration test, only where offscreen OpenGL is available:
+
+```bash
+python mujoco/scripts/demo.py \
+  --headless \
+  --detector color \
+  --robot panda \
+  --target cup \
+  --trajectory static \
+  --steps 240 \
+  --camera-fps 6 \
+  --no-realtime
+```
+
+Semantic integration requires:
+
+```bash
+python -m pip install -e "mujoco[semantic,test]"
+```
+
+Then run the color command with `--detector semantic --prompt "red mug"`, allowing Hugging Face model access or providing cached/local model paths.
+
+## Honest limitations
+
+- The camera is automatically framed but remains fixed in the world; eye-in-hand mounting, calibration error, sensor noise, and real-camera input are not implemented.
+- RGB-D detections estimate a visible surface, not the occluded object center. Oracle and image-based target positions therefore differ by design.
+- Non-metric monocular depth is diagnostic-only and cannot drive the Cartesian controller.
+- Target geoms are mocap-controlled and non-colliding. `contact` is center-point tracking, not physical contact, grasping, or force control.
+- Color recognition assumes a controlled synthetic scene and representative configured RGBA.
+- Semantic recognition depends on model quality, prompt, downloads/cache, hardware, and scene composition; base tests do not download production weights.
+- Custom robots must use self-contained MJCF, scalar controlled joints, compatible position actuators, and a meaningful EE descriptor. Reachability and stability cannot be proven from JSON alone.
+- Custom target meshes are limited to OBJ/STL and require correct user-provided scale/origin and licensing.
+- Wheels contain code only. Menagerie and user assets must remain externally accessible at runtime.
+- RGB-D headless runs still need an offscreen OpenGL context; oracle runs do not.
+- Physical obstacle avoidance, self-collision-aware planning, grasp synthesis, occlusion reasoning, and real-world transfer are not implemented.
+
+## Next work, if the scope expands
+
+1. Add eye-in-hand camera descriptors and calibrated camera/noise models.
+2. Add physical target bodies and contact/force-aware grasp tasks separate from the current visual reference target.
+3. Add collision-aware Cartesian planning and singularity/reachability diagnostics for arbitrary robot descriptors.
+4. Add opt-in cached-model semantic integration tests on suitable GPU/GL infrastructure.
+5. Add model-based object-center estimation when full object geometry and pose are available.

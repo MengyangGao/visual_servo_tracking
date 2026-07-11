@@ -91,20 +91,36 @@ def clamp_norm(vector: np.ndarray, max_norm: float) -> np.ndarray:
 
 def rotation_error_vector(desired_world_from_body: np.ndarray, current_world_from_body: np.ndarray) -> np.ndarray:
     error = np.asarray(desired_world_from_body, dtype=float).reshape(3, 3) @ np.asarray(current_world_from_body, dtype=float).reshape(3, 3).T
-    cos_angle = np.clip((np.trace(error) - 1.0) * 0.5, -1.0, 1.0)
-    angle = float(np.arccos(cos_angle))
-    if angle < 1e-7:
+    # The usual skew(R)/(2 sin(theta)) formula collapses to a zero vector at
+    # exactly 180 degrees.  Converting the relative rotation to a quaternion
+    # keeps a well-defined axis at pi and is also stable for small angles.
+    quat = rotation_matrix_to_quat_wxyz(error)
+    if quat[0] < 0.0:
+        quat = -quat
+    vector_norm = float(np.linalg.norm(quat[1:]))
+    if vector_norm < 1e-9:
         return np.zeros(3, dtype=float)
-    axis = np.array(
-        [
-            error[2, 1] - error[1, 2],
-            error[0, 2] - error[2, 0],
-            error[1, 0] - error[0, 1],
-        ],
-        dtype=float,
-    )
-    axis = axis / max(2.0 * np.sin(angle), 1e-9)
-    return axis * angle
+    angle = 2.0 * math.atan2(vector_norm, float(np.clip(quat[0], -1.0, 1.0)))
+    return quat[1:] * (angle / vector_norm)
+
+
+def vector_alignment_error(current_world: np.ndarray, desired_world: np.ndarray) -> np.ndarray:
+    """Return the shortest world-frame rotation aligning one direction to another."""
+    current = normalize(current_world, np.array([0.0, 0.0, 1.0]))
+    desired = normalize(desired_world, np.array([0.0, 0.0, 1.0]))
+    cross = np.cross(current, desired)
+    cross_norm = float(np.linalg.norm(cross))
+    dot = float(np.clip(np.dot(current, desired), -1.0, 1.0))
+    if cross_norm < 1e-9:
+        if dot > 0.0:
+            return np.zeros(3, dtype=float)
+        # Anti-parallel vectors have infinitely many shortest axes.  Select a
+        # stable axis orthogonal to the current direction.
+        basis = np.eye(3)[int(np.argmin(np.abs(current)))]
+        axis = normalize(np.cross(current, basis), np.array([1.0, 0.0, 0.0]))
+        return axis * math.pi
+    axis = cross / cross_norm
+    return axis * math.atan2(cross_norm, dot)
 
 
 def tool_z_facing_rotation(forward_world: np.ndarray, up_hint: np.ndarray | None = None) -> np.ndarray:
