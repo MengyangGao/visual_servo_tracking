@@ -14,7 +14,7 @@ The MuJoCo implementation supports:
 - reusable `reset()`, `step()`, `observe()`, and `close()` simulation APIs;
 - a benchmark matrix, branch-coverage checks, and Linux EGL CI.
 
-The default remains intentionally lightweight: Panda, cup, color segmentation, MuJoCo metric depth, position actuation, and a 16 cm front-standoff task.
+The default remains intentionally lightweight: Panda, cup, color segmentation, MuJoCo metric depth, position actuation, and a stable 16 cm standoff task. Select `--task front-standoff` when tool-axis facing is part of the experiment.
 
 ## Install
 

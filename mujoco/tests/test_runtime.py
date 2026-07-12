@@ -657,7 +657,7 @@ def test_zero_step_run_reports_zero_completed_steps() -> None:
 
 def test_default_path_uses_color_visual_front_standoff() -> None:
     assert DemoConfig().detector == "color"
-    assert DemoConfig().controller.task == "front-standoff"
+    assert DemoConfig().controller.task == "standoff"
 
 
 def test_viewer_key_controls_use_requested_shortcuts() -> None:

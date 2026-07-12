@@ -96,7 +96,7 @@ class TargetPart:
 
 @dataclass(frozen=True)
 class ControllerConfig:
-    task: str = "front-standoff"
+    task: str = "standoff"
     control_hz: float = 120.0
     position_gain: float = 7.0
     damping: float = 0.08

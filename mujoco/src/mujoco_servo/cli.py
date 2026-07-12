@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--task",
-        default="front-standoff",
+        default="standoff",
         choices=available_tasks(),
         help="servo objective",
     )
