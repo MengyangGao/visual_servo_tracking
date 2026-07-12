@@ -10,11 +10,26 @@ import pytest
 
 from ._bootstrap import SRC  # noqa: F401
 
-from mujoco_servo.config import CameraConfig, RobotSpec
+from mujoco_servo.config import CameraConfig, EnvironmentSpec, RobotSpec
 from mujoco_servo.app import VisualServoSimulation
 from mujoco_servo.config import DemoConfig
-from mujoco_servo.scene import build_scene, camera_position, frame_position, joint_positions, set_target_position, site_position
-from mujoco_servo.targets import TargetMotion, base_position, load_target_specs, resolve_target
+from mujoco_servo.scene import (
+    activate_grasp,
+    build_scene,
+    camera_position,
+    deactivate_grasp,
+    frame_position,
+    grasp_point_world,
+    joint_positions,
+    set_target_position,
+    site_position,
+)
+from mujoco_servo.targets import (
+    TargetMotion,
+    base_position,
+    load_target_specs,
+    resolve_target,
+)
 
 
 def _write_minimal_robot(tmp_path, *, include: bool = False) -> RobotSpec:
@@ -22,7 +37,9 @@ def _write_minimal_robot(tmp_path, *, include: bool = False) -> RobotSpec:
     asset_dir.mkdir(exist_ok=True)
     robot_xml = tmp_path / "minimal_robot.xml"
     if include:
-        robot_xml.write_text('<mujoco model="included"><include file="robot_part.xml"/></mujoco>')
+        robot_xml.write_text(
+            '<mujoco model="included"><include file="robot_part.xml"/></mujoco>'
+        )
     else:
         robot_xml.write_text(
             """
@@ -75,41 +92,68 @@ def test_scene_contains_robot_target_and_camera() -> None:
     assert scene.model.nu >= 7
     assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_BODY, "hand") >= 0
     assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_SITE, "target_site") >= 0
-    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_CAMERA, "servo_camera") >= 0
+    assert (
+        mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_CAMERA, "servo_camera") >= 0
+    )
     assert scene.ee_frame_type == "body_point"
-    ee = frame_position(scene.model, scene.data, scene.ee_frame_type, scene.ee_frame_name, scene.ee_frame_offset)
+    ee = frame_position(
+        scene.model,
+        scene.data,
+        scene.ee_frame_type,
+        scene.ee_frame_name,
+        scene.ee_frame_offset,
+    )
     target = site_position(scene.model, scene.data, "target_site")
     assert ee.shape == (3,)
     assert target.shape == (3,)
     assert np.isfinite(ee).all()
     assert np.isfinite(target).all()
-    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_GEOM, "target_geom_0") >= 0
+    assert (
+        mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_GEOM, "target_geom_0") >= 0
+    )
 
 
 def test_scene_can_load_alternate_robot_spec() -> None:
     scene = build_scene(resolve_target("box"), CameraConfig(), robot="ur5e")
     assert scene.robot.name == "ur5e"
     assert scene.ee_frame_type == "site"
-    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site") >= 0
+    assert (
+        mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site") >= 0
+    )
     assert scene.robot.dof == 6
 
 
 def test_scene_accepts_robot_specific_target_position() -> None:
-    scene = build_scene(resolve_target("apple"), CameraConfig(), robot="ur5e", target_position=np.array([-0.3, 0.3, 0.33]))
+    scene = build_scene(
+        resolve_target("apple"),
+        CameraConfig(),
+        robot="ur5e",
+        target_position=np.array([-0.3, 0.3, 0.33]),
+    )
     target = site_position(scene.model, scene.data, "target_site")
     assert np.allclose(target, [-0.3, 0.3, 0.33], atol=1e-6)
 
 
-def test_scene_uses_robot_default_target_position_and_supports_no_keyframe(tmp_path) -> None:
+def test_scene_uses_robot_default_target_position_and_supports_no_keyframe(
+    tmp_path,
+) -> None:
     robot = _write_minimal_robot(tmp_path)
     scene = build_scene(resolve_target("box"), CameraConfig(), robot=robot)
     assert scene.source == "external"
     assert scene.model.nkey == 0
     assert scene.ee_site_name == "minimal_tool"
     assert scene.ee_body_name is None
-    assert np.allclose(site_position(scene.model, scene.data, scene.target_site_name), robot.default_target_position)
-    assert np.allclose(joint_positions(scene.model, scene.data, robot.joint_names), robot.home_qpos)
-    assert np.allclose(camera_position(scene.model, scene.data, scene.camera_name), scene.data.cam_xpos[0])
+    assert np.allclose(
+        site_position(scene.model, scene.data, scene.target_site_name),
+        robot.default_target_position,
+    )
+    assert np.allclose(
+        joint_positions(scene.model, scene.data, robot.joint_names), robot.home_qpos
+    )
+    assert np.allclose(
+        camera_position(scene.model, scene.data, scene.camera_name),
+        scene.data.cam_xpos[0],
+    )
 
 
 def test_scene_rejects_robot_mjcf_include_with_clear_error(tmp_path) -> None:
@@ -126,7 +170,9 @@ def test_scene_rejects_torque_actuator_robot_adapter(tmp_path) -> None:
         '<motor name="minimal_actuator" joint="minimal_joint" gear="1"/>',
     )
     robot.xml_path.write_text(text)
-    with pytest.raises(RuntimeError, match="must be a non-degenerate MuJoCo position servo"):
+    with pytest.raises(
+        RuntimeError, match="must be a non-degenerate MuJoCo position servo"
+    ):
         build_scene(resolve_target("box"), robot=robot)
 
 
@@ -138,33 +184,54 @@ def test_scene_rejects_named_actuator_mapped_to_wrong_joint(tmp_path) -> None:
         '<joint name="minimal_joint" type="hinge" axis="0 0 1" range="-1 1"/>'
         '<joint name="other_joint" type="slide" axis="1 0 0" range="-0.1 0.1"/>',
     )
-    text = text.replace('joint="minimal_joint" kp="100"', 'joint="other_joint" kp="100"')
+    text = text.replace(
+        'joint="minimal_joint" kp="100"', 'joint="other_joint" kp="100"'
+    )
     robot.xml_path.write_text(text)
     with pytest.raises(RuntimeError, match="does not transmit joint 'minimal_joint'"):
         build_scene(resolve_target("box"), robot=robot)
 
 
-def test_scene_rejects_missing_declared_actuator_instead_of_falling_back(tmp_path) -> None:
-    robot = replace(_write_minimal_robot(tmp_path), actuator_names=("misspelled_actuator",))
-    with pytest.raises(RuntimeError, match="declared actuator 'misspelled_actuator' not found"):
+def test_scene_rejects_missing_declared_actuator_instead_of_falling_back(
+    tmp_path,
+) -> None:
+    robot = replace(
+        _write_minimal_robot(tmp_path), actuator_names=("misspelled_actuator",)
+    )
+    with pytest.raises(
+        RuntimeError, match="declared actuator 'misspelled_actuator' not found"
+    ):
         build_scene(resolve_target("box"), robot=robot)
 
 
 def test_scene_names_single_unnamed_joint_actuator_from_descriptor(tmp_path) -> None:
-    robot = replace(_write_minimal_robot(tmp_path), actuator_names=("declared_actuator",))
-    robot.xml_path.write_text(robot.xml_path.read_text().replace(' name="minimal_actuator"', ""))
+    robot = replace(
+        _write_minimal_robot(tmp_path), actuator_names=("declared_actuator",)
+    )
+    robot.xml_path.write_text(
+        robot.xml_path.read_text().replace(' name="minimal_actuator"', "")
+    )
     scene = build_scene(resolve_target("box"), robot=robot)
-    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "declared_actuator") >= 0
+    assert (
+        mujoco.mj_name2id(
+            scene.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "declared_actuator"
+        )
+        >= 0
+    )
 
 
-def test_scene_rejects_non_joint_actuator_transmission_with_colliding_id(tmp_path) -> None:
+def test_scene_rejects_non_joint_actuator_transmission_with_colliding_id(
+    tmp_path,
+) -> None:
     robot = _write_minimal_robot(tmp_path)
     text = robot.xml_path.read_text()
     text = text.replace(
         "<actuator>",
         '<tendon><fixed name="minimal_tendon"><joint joint="minimal_joint" coef="1"/></fixed></tendon><actuator>',
     )
-    text = text.replace('joint="minimal_joint" kp="100"', 'tendon="minimal_tendon" kp="100"')
+    text = text.replace(
+        'joint="minimal_joint" kp="100"', 'tendon="minimal_tendon" kp="100"'
+    )
     robot.xml_path.write_text(text)
     with pytest.raises(RuntimeError, match="must use a joint transmission"):
         build_scene(resolve_target("box"), robot=robot)
@@ -187,7 +254,9 @@ def test_scene_rejects_home_position_outside_actuator_control_range(tmp_path) ->
         build_scene(resolve_target("box"), robot=robot)
 
 
-def test_scene_rejects_passive_actuator_constant_outside_control_range(tmp_path) -> None:
+def test_scene_rejects_passive_actuator_constant_outside_control_range(
+    tmp_path,
+) -> None:
     robot = _write_minimal_robot(tmp_path)
     text = robot.xml_path.read_text().replace(
         "</actuator>",
@@ -195,16 +264,22 @@ def test_scene_rejects_passive_actuator_constant_outside_control_range(tmp_path)
     )
     robot.xml_path.write_text(text)
     robot = replace(robot, passive_actuator_ctrl=(("passive_actuator", 2.0),))
-    with pytest.raises(RuntimeError, match="passive actuator 'passive_actuator'.*outside range"):
+    with pytest.raises(
+        RuntimeError, match="passive actuator 'passive_actuator'.*outside range"
+    ):
         build_scene(resolve_target("box"), robot=robot)
 
 
 def test_scene_scales_position_command_by_scalar_transmission_gear(tmp_path) -> None:
     robot = _write_minimal_robot(tmp_path)
-    text = robot.xml_path.read_text().replace('joint="minimal_joint" kp="100"', 'joint="minimal_joint" kp="100" gear="2"')
+    text = robot.xml_path.read_text().replace(
+        'joint="minimal_joint" kp="100"', 'joint="minimal_joint" kp="100" gear="2"'
+    )
     robot.xml_path.write_text(text)
     scene = build_scene(resolve_target("box"), robot=robot)
-    actuator_id = mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "minimal_actuator")
+    actuator_id = mujoco.mj_name2id(
+        scene.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "minimal_actuator"
+    )
     assert np.isclose(scene.data.ctrl[actuator_id], 2.0 * robot.home_qpos[0])
 
 
@@ -280,7 +355,9 @@ def test_custom_target_file_accepts_top_level_list(tmp_path) -> None:
         ("parts", {"shape": "box"}, "parts must be a list"),
     ],
 )
-def test_target_file_rejects_non_list_collection_fields(tmp_path, field, value, message) -> None:
+def test_target_file_rejects_non_list_collection_fields(
+    tmp_path, field, value, message
+) -> None:
     target_file = tmp_path / "targets.json"
     target_file.write_text(json.dumps({"targets": [{"name": "bad", field: value}]}))
     with pytest.raises(ValueError, match=message):
@@ -330,9 +407,13 @@ def test_capsule_size_is_full_outer_size_and_target_is_noncolliding() -> None:
         ("capsule", [0.06, 0.06, 0.04]),
     ],
 )
-def test_target_file_rejects_inconsistent_round_geometry_sizes(tmp_path, shape, size) -> None:
+def test_target_file_rejects_inconsistent_round_geometry_sizes(
+    tmp_path, shape, size
+) -> None:
     target_file = tmp_path / "targets.json"
-    target_file.write_text(json.dumps([{"name": "bad-round", "shape": shape, "size": size}]))
+    target_file.write_text(
+        json.dumps([{"name": "bad-round", "shape": shape, "size": size}])
+    )
     with pytest.raises(ValueError, match="equal|diameter|height"):
         load_target_specs(target_file)
 
@@ -369,7 +450,9 @@ def test_scene_loads_relative_mesh_target_with_scale_and_safe_path(tmp_path) -> 
 
 def test_scene_loads_open_visual_mesh_as_shell(tmp_path) -> None:
     mesh_path = tmp_path / "open-plane.obj"
-    mesh_path.write_text("v 0 0 0\nv 0.1 0 0\nv 0.1 0.1 0\nv 0 0.1 0\nf 1 2 3\nf 1 3 4\n")
+    mesh_path.write_text(
+        "v 0 0 0\nv 0.1 0 0\nv 0.1 0.1 0\nv 0 0.1 0\nf 1 2 3\nf 1 3 4\n"
+    )
     target_file = tmp_path / "targets.json"
     target_file.write_text(
         json.dumps(
@@ -389,7 +472,9 @@ def test_scene_loads_open_visual_mesh_as_shell(tmp_path) -> None:
     assert mesh_id >= 0
 
 
-def test_scene_resolves_texture_without_texturedir_relative_to_robot_xml(tmp_path) -> None:
+def test_scene_resolves_texture_without_texturedir_relative_to_robot_xml(
+    tmp_path,
+) -> None:
     robot = _write_minimal_robot(tmp_path)
     texture_path = tmp_path / "root_texture.png"
     assert cv2.imwrite(str(texture_path), np.full((4, 4, 3), 180, dtype=np.uint8))
@@ -402,12 +487,18 @@ def test_scene_resolves_texture_without_texturedir_relative_to_robot_xml(tmp_pat
     text = text.replace('mass="1"', 'mass="1" material="root_material"')
     robot.xml_path.write_text(text)
     scene = build_scene(resolve_target("box"), robot=robot)
-    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_TEXTURE, "root_texture") >= 0
+    assert (
+        mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_TEXTURE, "root_texture") >= 0
+    )
 
 
-def test_scene_keeps_injected_visual_target_when_source_discards_visuals(tmp_path) -> None:
+def test_scene_keeps_injected_visual_target_when_source_discards_visuals(
+    tmp_path,
+) -> None:
     robot = _write_minimal_robot(tmp_path)
-    text = robot.xml_path.read_text().replace('autolimits="true"', 'autolimits="true" discardvisual="true"')
+    text = robot.xml_path.read_text().replace(
+        'autolimits="true"', 'autolimits="true" discardvisual="true"'
+    )
     robot.xml_path.write_text(text)
     scene = build_scene(resolve_target("box"), robot=robot)
     assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_GEOM, "target_geom") >= 0
@@ -415,14 +506,27 @@ def test_scene_keeps_injected_visual_target_when_source_discards_visuals(tmp_pat
 
 def test_scene_disables_source_strippath_for_absolute_target_mesh(tmp_path) -> None:
     robot = _write_minimal_robot(tmp_path)
-    robot.xml_path.write_text(robot.xml_path.read_text().replace('autolimits="true"', 'autolimits="true" strippath="true"'))
+    robot.xml_path.write_text(
+        robot.xml_path.read_text().replace(
+            'autolimits="true"', 'autolimits="true" strippath="true"'
+        )
+    )
     target_dir = tmp_path / "separate target assets"
     target_dir.mkdir()
     mesh_path = target_dir / "target.obj"
     _write_tetrahedron_obj(mesh_path)
     target_file = target_dir / "targets.json"
     target_file.write_text(
-        json.dumps([{"name": "mesh", "shape": "mesh", "mesh_file": mesh_path.name, "size": [0.02, 0.02, 0.02]}])
+        json.dumps(
+            [
+                {
+                    "name": "mesh",
+                    "shape": "mesh",
+                    "mesh_file": mesh_path.name,
+                    "size": [0.02, 0.02, 0.02],
+                }
+            ]
+        )
     )
     target = load_target_specs(target_file)["mesh"]
     scene = build_scene(target, robot=robot)
@@ -433,12 +537,17 @@ def test_scene_preserves_robot_assets_that_rely_on_strippath(tmp_path) -> None:
     robot = _write_minimal_robot(tmp_path)
     mesh_path = robot.asset_dir / "link.obj"
     _write_tetrahedron_obj(mesh_path)
-    text = robot.xml_path.read_text().replace('autolimits="true"', 'autolimits="true" strippath="true"')
+    text = robot.xml_path.read_text().replace(
+        'autolimits="true"', 'autolimits="true" strippath="true"'
+    )
     text = text.replace(
         "<worldbody>",
         '<asset><mesh name="link_mesh" file="exported/stale/path/link.obj" inertia="shell"/></asset><worldbody>',
     )
-    text = text.replace('<geom type="capsule" size="0.025 0.10" mass="1"/>', '<geom type="mesh" mesh="link_mesh" mass="1"/>')
+    text = text.replace(
+        '<geom type="capsule" size="0.025 0.10" mass="1"/>',
+        '<geom type="mesh" mesh="link_mesh" mass="1"/>',
+    )
     robot.xml_path.write_text(text)
     scene = build_scene(resolve_target("box"), robot=robot)
     assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_MESH, "link_mesh") >= 0
@@ -446,7 +555,9 @@ def test_scene_preserves_robot_assets_that_rely_on_strippath(tmp_path) -> None:
 
 def test_scene_rejects_reserved_injected_name_collision_clearly(tmp_path) -> None:
     robot = _write_minimal_robot(tmp_path)
-    robot.xml_path.write_text(robot.xml_path.read_text().replace('name="minimal_link"', 'name="target"'))
+    robot.xml_path.write_text(
+        robot.xml_path.read_text().replace('name="minimal_link"', 'name="target"')
+    )
     with pytest.raises(RuntimeError, match="reserved injected body name 'target'"):
         build_scene(resolve_target("box"), robot=robot)
 
@@ -475,9 +586,14 @@ def test_scene_loads_mesh_part_in_compound_target(tmp_path) -> None:
             ]
         )
     )
-    scene = build_scene(load_target_specs(target_file)["compound-mesh"], robot=_write_minimal_robot(tmp_path))
+    scene = build_scene(
+        load_target_specs(target_file)["compound-mesh"],
+        robot=_write_minimal_robot(tmp_path),
+    )
     geom_id = mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_GEOM, "target_geom_0")
-    mesh_id = mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_MESH, "target_part_mesh_0")
+    mesh_id = mujoco.mj_name2id(
+        scene.model, mujoco.mjtObj.mjOBJ_MESH, "target_part_mesh_0"
+    )
     assert scene.model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_MESH
     assert np.allclose(scene.model.mesh_scale[mesh_id], [1.5, 1.5, 1.5])
 
@@ -538,7 +654,10 @@ def test_custom_target_phrase_match_has_priority_over_builtin(tmp_path) -> None:
             ]
         )
     )
-    assert resolve_target("please track the cup.", load_target_specs(target_file)).name == "custom-cup"
+    assert (
+        resolve_target("please track the cup.", load_target_specs(target_file)).name
+        == "custom-cup"
+    )
 
 
 def test_custom_target_part_offset_alias_is_supported(tmp_path) -> None:
@@ -655,3 +774,165 @@ def test_set_target_position_rejects_nonfinite_values() -> None:
     scene = build_scene(resolve_target("cup"), CameraConfig())
     with pytest.raises(ValueError, match="target position"):
         set_target_position(scene.model, scene.data, np.array([0.4, np.nan, 0.3]))
+
+
+@pytest.mark.parametrize("actuator_mode", ["position", "velocity", "torque"])
+def test_scene_compiles_all_actuator_modes(tmp_path, actuator_mode) -> None:
+    scene = build_scene(
+        resolve_target("box"),
+        robot=_write_minimal_robot(tmp_path),
+        actuator_mode=actuator_mode,
+    )
+    assert scene.actuator_mode == actuator_mode
+    actuator_id = mujoco.mj_name2id(
+        scene.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "minimal_actuator"
+    )
+    if actuator_mode == "position":
+        assert np.isclose(
+            scene.model.actuator_biasprm[actuator_id, 1],
+            -scene.model.actuator_gainprm[actuator_id, 0],
+        )
+    elif actuator_mode == "velocity":
+        assert np.isclose(
+            scene.model.actuator_biasprm[actuator_id, 2],
+            -scene.model.actuator_gainprm[actuator_id, 0],
+        )
+    else:
+        assert scene.model.actuator_biastype[actuator_id] == mujoco.mjtBias.mjBIAS_NONE
+    expected = 0.15 if actuator_mode == "position" else 0.0
+    assert np.allclose(scene.data.ctrl[actuator_id], expected)
+
+
+@pytest.mark.parametrize("robot_name", ["panda", "ur5e", "lite6"])
+@pytest.mark.parametrize("actuator_mode", ["position", "velocity", "torque"])
+def test_official_robot_models_compile_in_every_actuator_mode(
+    robot_name, actuator_mode
+) -> None:
+    scene = build_scene(
+        resolve_target("box"), robot=robot_name, actuator_mode=actuator_mode
+    )
+    assert scene.robot.name == robot_name
+    assert scene.actuator_mode == actuator_mode
+
+
+def test_physical_target_falls_onto_table_and_has_contact(tmp_path) -> None:
+    target = replace(
+        resolve_target("box"),
+        dynamics="physical",
+        base_position=(0.35, 0.0, 0.45),
+        mass=0.2,
+        friction=(0.9, 0.01, 0.001),
+    )
+    scene = build_scene(
+        target,
+        robot=_write_minimal_robot(tmp_path),
+        target_position=np.array(target.base_position),
+    )
+    body_id = mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_BODY, "target")
+    assert scene.model.body_mocapid[body_id] < 0
+    assert scene.model.body_jntnum[body_id] == 1
+    geom_id = mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_GEOM, "target_geom")
+    assert scene.model.geom_contype[geom_id] == 1
+    for _ in range(1000):
+        mujoco.mj_step(scene.model, scene.data)
+    assert 0.24 < site_position(scene.model, scene.data, "target_site")[2] < 0.30
+    assert scene.data.ncon > 0
+
+
+def test_grasp_points_transform_to_world_and_weld_can_toggle(tmp_path) -> None:
+    target_file = tmp_path / "targets.json"
+    target_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "targets": [
+                    {
+                        "schema_version": 1,
+                        "name": "graspable",
+                        "shape": "box",
+                        "size": [0.04, 0.05, 0.08],
+                        "dynamics": "physical",
+                        "mass": 0.15,
+                        "friction": [0.8, 0.01, 0.001],
+                        "quat": [1.0, 0.0, 0.0, 0.0],
+                        "grasp_points": [
+                            {
+                                "name": "top",
+                                "position": [0.0, 0.0, 0.04],
+                                "approach": [0.0, 0.0, -2.0],
+                                "width_m": 0.04,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    target = load_target_specs(target_file)["graspable"]
+    robot = replace(
+        _write_minimal_robot(tmp_path),
+        grasp_attachment_body="minimal_link",
+        max_gripper_width_m=0.08,
+    )
+    scene = build_scene(target, robot=robot, target_position=np.array([0.0, 0.0, 0.36]))
+    point = grasp_point_world(scene, "top")
+    assert np.allclose(point.position, [0.0, 0.0, 0.40])
+    assert np.allclose(point.approach, [0.0, 0.0, -1.0])
+    activate_grasp(scene, "top", max_distance_m=0.2)
+    equality_id = mujoco.mj_name2id(
+        scene.model, mujoco.mjtObj.mjOBJ_EQUALITY, "servo_grasp_weld"
+    )
+    assert scene.data.eq_active[equality_id]
+    deactivate_grasp(scene)
+    assert not scene.data.eq_active[equality_id]
+
+
+def test_default_grasp_point_is_top_down() -> None:
+    point = resolve_target("box").grasp_points[0]
+    assert point.name == "center"
+    assert point.approach == (0.0, 0.0, -1.0)
+
+
+def test_scene_environment_switches_and_eye_in_hand_camera(tmp_path) -> None:
+    robot = _write_minimal_robot(tmp_path)
+    camera = CameraConfig(
+        position=(0.0, 0.0, 0.05), lookat=(0.0, 0.0, 0.20), mount_body="minimal_link"
+    )
+    scene = build_scene(
+        resolve_target("box"),
+        camera,
+        robot=robot,
+        environment=EnvironmentSpec(add_floor=False, add_table=False, add_lights=False),
+    )
+    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_CAMERA, camera.name) >= 0
+    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_BODY, "camera_marker") < 0
+    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_GEOM, "servo_floor") < 0
+    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_GEOM, "servo_table") < 0
+
+
+def test_mesh_size_can_be_inferred_and_schema_is_versioned(tmp_path) -> None:
+    mesh_path = tmp_path / "auto.obj"
+    _write_tetrahedron_obj(mesh_path)
+    target_file = tmp_path / "targets.json"
+    target_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "targets": [
+                    {
+                        "schema_version": 1,
+                        "name": "auto-mesh",
+                        "shape": "mesh",
+                        "mesh_file": mesh_path.name,
+                        "scale": [2, 3, 4],
+                    }
+                ],
+            }
+        )
+    )
+    target = load_target_specs(target_file)["auto-mesh"]
+    assert target.schema_version == 1
+    assert np.allclose(target.size, [0.04, 0.06, 0.08], atol=1e-6)
+    target_file.write_text(json.dumps({"schema_version": 2, "targets": []}))
+    with pytest.raises(ValueError, match="unsupported"):
+        load_target_specs(target_file)

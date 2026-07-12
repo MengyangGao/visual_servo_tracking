@@ -1,151 +1,276 @@
 # Visual Servo Tracking
 
-This repository contains visual-servo experiments for robotic manipulators.
+This repository contains a configurable MuJoCo RGB-D visual-servo simulator. The active implementation is under `mujoco/`; `matlab/` is a frozen historical archive and is not part of current validation.
 
-- `mujoco/` is the active project: a Python and MuJoCo RGB-D visual-servo simulator.
-- `matlab/` is frozen historical work. It remains in the repository for reference, but it is not in the active implementation or validation scope.
+The MuJoCo implementation supports:
 
-## MuJoCo capabilities
+- simulator-truth, color, and open-vocabulary semantic target detection;
+- metric MuJoCo depth and optional Depth Anything V2;
+- world-fixed or robot-mounted RGB-D cameras, with optional sensor noise and dropout;
+- Franka Panda, Universal Robots UR5e, and UFactory Lite6 models from MuJoCo Menagerie;
+- position-, velocity-, and torque-actuated joint control;
+- visual reference targets and free-body physical targets;
+- versioned custom robot and target descriptors, including executable grasp points;
+- reusable `reset()`, `step()`, `observe()`, and `close()` simulation APIs;
+- a benchmark matrix, branch-coverage checks, and Linux EGL CI.
 
-The simulator currently provides:
+The default remains intentionally lightweight: Panda, cup, color segmentation, MuJoCo metric depth, position actuation, and a 16 cm front-standoff task.
 
-- a world-fixed camera named `servo_camera` that is automatically side-framed around the selected robot workspace and renders RGB plus depth;
-- `color`, `semantic`, and simulator-truth `oracle` perception backends;
-- public simulator-state and named body/site position access;
-- replaceable robot models through three built-in MuJoCo Menagerie descriptors or a strict JSON robot descriptor;
-- replaceable primitive, compound, OBJ, and STL visual target models through strict JSON;
-- static, circular, figure-eight, random-walk, and waypoint target motion;
-- contact, standoff, front-standoff, and single-axis alignment tasks;
-- a passive viewer with a top-right camera overlay and keyboard target motion.
+## Install
 
-The default configuration is deliberately lightweight: `panda`, `cup`, `color`, MuJoCo metric depth, and `front-standoff` at 16 cm. Semantic models are optional.
-
-### Position semantics and safety behavior
-
-The three perception paths do not report the same physical point:
-
-- `oracle` reads `target_site` from MuJoCo and reports the simulated target-body origin with anchor `truth_center`.
-- `color` segments pixels near the target's top-level `rgba`, then unprojects the visible RGB-D mask surface. Its 3D anchor is normally `surface_depth_mask_centroid`.
-- `semantic` uses Grounding DINO for a box, SAM for the initial mask, and a local mask/color/depth tracker afterward. It also reports a visible RGB-D surface anchor, not simulator truth.
-
-Color and semantic detections drive the controller only when depth is metric. Relative monocular depth, `--depth-backend none`, or an unsuccessful learned-depth calibration can still be displayed for diagnostics, but produces a `non_metric_depth` anchor and does not command motion. If a valid visual observation becomes older than `--detection-timeout` (default `0.75` simulation seconds), the controller holds the current joints instead of pursuing stale data. Non-oracle modes never fall back to simulator truth.
-
-Target geoms are visual and have collision disabled. Consequently, `contact` means "place the configured end-effector control point at `target_site`"; it is not a physical contact, grasp, or force-control task and may visually pass into the target. The default `front-standoff` mode avoids that behavior. For color and semantic modes, the controller tracks the detected visible surface anchor, while summary truth-error fields are evaluated against the simulated center; those values need not coincide for a large object.
-
-## Installation
-
-Python 3.10 and MuJoCo 3.3.1 or newer are required. The repository does not assume a pre-existing Conda environment.
-
-From the repository root:
+Initialize the pinned Menagerie assets first:
 
 ```bash
 git submodule update --init --recursive mujoco/vendor/mujoco_menagerie
+```
 
+### Conda environment
+
+The checked-in environment installs semantic, test, and development dependencies:
+
+```bash
+conda env create -f environment.yml
+conda activate visual_servo
+```
+
+Recreate it after dependency changes with:
+
+```bash
+conda env remove -n visual_servo
+conda env create -f environment.yml
+```
+
+### Python virtual environment
+
+For the lightweight color/oracle simulator:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e "mujoco[test]"
+python -m pip install -e "mujoco[test,dev]"
 ```
 
-On Windows, activate the environment with `.venv\Scripts\activate` instead.
-
-For semantic perception and learned depth, install both the semantic and test extras:
+Install optional semantic and learned-depth dependencies with:
 
 ```bash
-python -m pip install -e "mujoco[semantic,test]"
+python -m pip install -e "mujoco[semantic,test,dev]"
 ```
 
-The editable install uses the checked-out Menagerie submodule. A built wheel contains the Python package but not the external Menagerie git submodule or user-provided meshes. To use built-in robots from a wheel, point the process at a Menagerie checkout before importing `mujoco_servo`:
+Python 3.10 or newer and MuJoCo 3.3.1 or newer are required.
+
+## Stable smoke commands
+
+These oracle commands do not render and are suitable for a display-independent controller check:
 
 ```bash
-export MUJOCO_MENAGERIE_PATH=/absolute/path/to/mujoco_menagerie
+python -m mujoco_servo \
+  --headless --no-realtime \
+  --detector oracle --trajectory static \
+  --robot panda --target cup \
+  --actuator-mode position --steps 240
+
+python -m mujoco_servo \
+  --headless --no-realtime \
+  --detector oracle --trajectory static \
+  --robot panda --target cup \
+  --actuator-mode velocity --steps 240
+
+python -m mujoco_servo \
+  --headless --no-realtime \
+  --detector oracle --trajectory static \
+  --robot panda --target cup \
+  --actuator-mode torque --steps 240
 ```
 
-The directory must directly contain `franka_emika_panda/`, `universal_robots_ur5e/`, and `ufactory_lite6/`. Alternatively, use `--robot-file` with your own assets.
+The installed `mujoco-servo` command and `python mujoco/scripts/demo.py` accept the same options. Run `python -m mujoco_servo --help` for the authoritative list.
 
-## Running the simulator
+### Interactive viewer
 
-Default interactive run on Linux or Windows:
+Linux and Windows:
 
 ```bash
-python mujoco/scripts/demo.py \
-  --robot panda \
-  --target cup \
-  --trajectory circle
+python -m mujoco_servo --robot panda --target cup --trajectory circle
 ```
 
-On macOS, the native passive viewer must be launched through `mjpython`:
+macOS must launch the native passive viewer through MuJoCo's `mjpython`:
 
 ```bash
-mjpython mujoco/scripts/demo.py \
-  --robot panda \
-  --target cup \
-  --trajectory circle
+mjpython mujoco/scripts/demo.py --robot panda --target cup --trajectory circle
 ```
 
-The installed console entry point and module entry point are also available for headless runs:
+Viewer target controls are the arrow keys for horizontal motion, `,` and `.` for down/up, and Space or Backspace to reset the manual offset. `--scripted-target` disables keyboard offsets.
+
+### Three built-in robots
 
 ```bash
-mujoco-servo --headless --detector oracle --steps 240 --trajectory static --no-realtime
-python -m mujoco_servo --headless --detector oracle --steps 240 --trajectory static --no-realtime
+python -m mujoco_servo --headless --no-realtime --detector oracle --trajectory static --robot panda --target cup --steps 240
+python -m mujoco_servo --headless --no-realtime --detector oracle --trajectory static --robot ur5e --target box --steps 240
+python -m mujoco_servo --headless --no-realtime --detector oracle --trajectory static --robot lite6 --target apple --steps 240
 ```
 
-`--headless` disables the passive viewer, but color and semantic perception still render RGB-D offscreen and therefore still require a working OpenGL backend. Linux CI commonly uses an EGL or OSMesa-capable MuJoCo setup. A macOS background session without a CoreGraphics connection may not support offscreen rendering. `oracle` does not render and is the appropriate display-independent smoke test.
+| Robot | Controlled joints | End-effector frame | Grasp attachment |
+| --- | ---: | --- | --- |
+| `panda` | 7 | `hand` body point + 0.10 m local offset | `hand`; official coupled finger actuator metadata is retained |
+| `ur5e` | 6 | `attachment_site` | `wrist_3_link` weld/suction abstraction |
+| `lite6` | 6 | `attachment_site` | `link6` weld/suction abstraction |
 
-### Semantic example
+All three compile in every supported actuator mode. UR5e and Lite6 do not include a modeled gripper in these Menagerie files, so their stable grasp abstraction is an explicit runtime weld rather than a simulated finger closure.
 
-`--target` chooses the simulated model. `--prompt` independently tells Grounding DINO what to find:
+## Perception
+
+### Color
+
+Color perception segments the selected target's configured dominant RGBA and unprojects the visible mask with metric depth:
 
 ```bash
-mjpython mujoco/scripts/demo.py \
-  --robot panda \
-  --target cup \
-  --prompt "red mug" \
-  --trajectory static \
-  --detector semantic \
-  --depth-backend mujoco \
-  --camera-fps 3 \
-  --detection-timeout 0.75
+python -m mujoco_servo \
+  --headless --no-realtime \
+  --detector color --depth-backend mujoco \
+  --robot panda --target cup --trajectory static \
+  --camera-fps 6 --steps 240
 ```
 
-The semantic backend loads models lazily on first use. The first run downloads model weights through Hugging Face unless they are already cached. Viewer inference uses a background worker where supported; macOS keeps viewer perception on the main thread to avoid AppKit thread violations. Headless perception is synchronous and sampled against simulation time at `--camera-fps`.
+Color and semantic modes still render RGB-D when `--headless` is used, so they require a working OpenGL context. Linux CI uses `MUJOCO_GL=egl`; macOS background sessions without CoreGraphics may not support offscreen rendering.
 
-Semantic environment variables:
+### Semantic recognition
 
-| Variable | Default | Purpose |
+Semantic perception uses Grounding DINO for open-vocabulary boxes, SAM for masks, and a local color/depth tracker between redetections:
+
+```bash
+MUJOCO_SERVO_DEVICE=auto mjpython mujoco/scripts/demo.py \
+  --robot panda --target cup \
+  --detector semantic --prompt "red drinking mug" \
+  --depth-backend mujoco --trajectory static --camera-fps 3
+```
+
+Device selection in `auto` mode is CUDA, then Apple MPS when available, then CPU. On Apple Silicon no explicit MPS flag is needed; `--depth-device auto` and `MUJOCO_SERVO_DEVICE=auto` select it automatically. macOS viewer perception stays on the main thread to respect AppKit restrictions.
+
+The JSON run summary records the effective `perception_device` and `depth_device`. MuJoCo rigid-body dynamics itself runs on CPU; rendering uses the platform OpenGL backend, while learned perception/depth can use CUDA or MPS.
+
+The first semantic run downloads model weights unless they are already cached. Override model/device settings with:
+
+| Variable | Default |
+| --- | --- |
+| `MUJOCO_SERVO_GDINO_MODEL` | `IDEA-Research/grounding-dino-tiny` |
+| `MUJOCO_SERVO_SAM_MODEL` | `facebook/sam-vit-base` |
+| `MUJOCO_SERVO_DEVICE` | `auto` |
+| `MUJOCO_SERVO_GDINO_BOX_THRESHOLD` | `0.25` |
+| `MUJOCO_SERVO_GDINO_TEXT_THRESHOLD` | `0.25` |
+| `MUJOCO_SERVO_REDETECT_INTERVAL` | `45` |
+| `MUJOCO_SERVO_MAX_TRACK_FAILURES` | `3` |
+
+### Depth and observation timing
+
+MuJoCo metric depth is the default. Optional learned depth is selected with `--depth-backend depth-anything-v2`; relative monocular output is diagnostic-only unless metric calibration succeeds. Non-metric anchors never drive the Cartesian controller.
+
+The runtime models target loss and reacquisition explicitly. Useful robustness controls include:
+
+- `--detection-timeout` and `--reacquire-confirm-frames`;
+- `--perception-latency`, `--perception-jitter`, and `--perception-drop-probability`;
+- `--rgb-noise-std`, `--depth-noise-std`, and `--camera-dropout-probability`.
+
+Color and semantic detections are visible surface anchors. Oracle detection reads the simulated `target_site` center. Their reported 3D positions therefore need not match for a large object.
+
+## Controller and actuator modes
+
+The Cartesian resolved-rate controller uses weighted adaptive damping, joint-limit avoidance, acceleration and speed limits, null-space posture control, and exact hold behavior during perception loss.
+
+| Mode | CLI | Meaning |
 | --- | --- | --- |
-| `MUJOCO_SERVO_GDINO_MODEL` | `IDEA-Research/grounding-dino-tiny` | Grounding DINO model id or local path |
-| `MUJOCO_SERVO_SAM_MODEL` | `facebook/sam-vit-base` | SAM model id or local path |
-| `MUJOCO_SERVO_DEVICE` | `auto` | Semantic device and learned-depth fallback device: `auto`, `cpu`, `mps`, or `cuda` |
-| `MUJOCO_SERVO_GDINO_BOX_THRESHOLD` | `0.25` | Grounding DINO box threshold |
-| `MUJOCO_SERVO_GDINO_TEXT_THRESHOLD` | `0.25` | Grounding DINO text threshold |
-| `MUJOCO_SERVO_REDETECT_INTERVAL` | `45` | Local-tracker frames before semantic redetection |
-| `MUJOCO_SERVO_MAX_TRACK_FAILURES` | `3` | Tracker failures before reinitialization |
+| Position | `--actuator-mode position` | Sends joint-position references to MuJoCo position servos. |
+| Velocity | `--actuator-mode velocity` | Rewrites controlled actuators as velocity servos and sends velocity references with bias-force feed-forward. |
+| Torque | `--actuator-mode torque` | Rewrites controlled actuators as motors and applies bias compensation plus joint-space PD torque. |
 
-`--depth-device` controls the optional learned-depth pipeline; semantic device selection uses `MUJOCO_SERVO_DEVICE`.
+Relevant tuning flags are `--control-hz`, `--max-joint-accel`, `--joint-limit-margin`, `--torque-kp`, and `--torque-kd`. Torque mode is still a simulation controller; its gains are not safe commands for a real robot.
 
-### Learned depth
+Tasks include `front-standoff`, `standoff`, `contact`, `touch`, `grasp`, and single-axis alignment. `touch` and `grasp` use a staged pregrasp/approach/lift workflow with physical targets. `--grasp-point`, `--grasp-approach`, `--grasp-attach-distance`, `--grasp-lift`, and `--grasp-stage-tolerance` expose task tuning without changing the descriptor. Grasp attachment is explicit and reversible; it is not a claim of force-closure grasp synthesis.
 
-Depth Anything V2 can replace the direct MuJoCo depth provider:
+## Physical targets and grasp points
 
-```bash
-python mujoco/scripts/demo.py \
-  --headless \
-  --robot panda \
-  --target cup \
-  --detector color \
-  --depth-backend depth-anything-v2 \
-  --depth-model depth-anything/Depth-Anything-V2-Small-hf \
-  --camera-fps 2 \
-  --steps 240 \
-  --no-realtime
+Targets default to `"dynamics": "visual"`, preserving the old mocap-controlled, non-colliding reference behavior. `"dynamics": "physical"` creates a colliding free body with mass and friction; it falls under MuJoCo gravity and can contact the default table.
+
+Target files accept a top-level list or a versioned wrapper. Missing `schema_version` means version 1 for backward compatibility:
+
+```json
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "schema_version": 1,
+      "name": "grasp-box",
+      "shape": "box",
+      "size": [0.06, 0.05, 0.10],
+      "rgba": [0.18, 0.52, 0.92, 1.0],
+      "base_position": [0.48, 0.0, 0.40],
+      "quat": [1.0, 0.0, 0.0, 0.0],
+      "dynamics": "physical",
+      "mass": 0.20,
+      "friction": [0.9, 0.01, 0.001],
+      "grasp_points": [
+        {
+          "name": "top",
+          "position": [0.0, 0.0, 0.05],
+          "approach": [0.0, 0.0, -1.0],
+          "width_m": 0.05
+        }
+      ]
+    }
+  ]
+}
 ```
 
-By default, the backend attempts to calibrate learned output with MuJoCo metric depth. `--no-depth-metric-hint` removes that simulator hint. Learned output without a successful calibration is treated as relative depth and is intentionally rejected for control; a model name containing words such as `metric` is not trusted as a unit contract.
+`position` and `approach` are expressed in the target body's local coordinates; `approach` points along the final motion from pregrasp to grasp and is normalized. The optional width is checked against robot gripper metadata where available. If no grasp point is supplied, a center top-down grasp point with an inferred XY width is created.
 
-## Reading simulator positions
+Select the target with:
 
-`VisualServoSimulation` exposes copies of the current MuJoCo state in world coordinates. Linear positions are in meters; hinge joint values are radians and slide-joint values are meters.
+```bash
+python -m mujoco_servo \
+  --target grasp-box --target-file /path/to/targets.json \
+  --task grasp --detector oracle --trajectory static
+```
+
+A built-in target is automatically promoted to physical dynamics when `--task touch` or `--task grasp` is selected. A stable display-independent grasp smoke is:
+
+```bash
+python -m mujoco_servo \
+  --headless --no-realtime \
+  --robot panda --target cup \
+  --task grasp --detector oracle --trajectory static \
+  --steps 1200
+```
+
+OBJ/STL mesh targets and mesh parts are supported. When mesh `size` is omitted, the loader computes its scaled AABB from OBJ or binary/ASCII STL vertices. Paths resolve relative to the target descriptor.
+
+`VisualServoSimulation.get_grasp_point()`, `activate_grasp()`, and `release_grasp()` provide public explicit attachment control. The lower-level scene functions are `grasp_point_world()`, `activate_grasp()`, and `deactivate_grasp()`.
+
+## Camera and environment
+
+The default camera is world-fixed and automatically side-framed for the selected robot workspace. A non-default Python `CameraConfig(position=..., lookat=...)` preserves an explicit world pose.
+
+For an eye-in-hand camera, set a robot body name; position and look-at coordinates then use that body's local frame. Use Python when an explicit local pose is required:
+
+```python
+from mujoco_servo import CameraConfig, DemoConfig, VisualServoSimulation
+
+config = DemoConfig(
+    camera=CameraConfig(
+        mount_body="hand",
+        position=(0.0, 0.0, 0.05),
+        lookat=(0.0, 0.0, 0.30),
+    )
+)
+with VisualServoSimulation(config) as simulation:
+    print(simulation.observe().camera_position)
+```
+
+`--camera-mount-body hand` exposes the mounting choice from the CLI; the complete local camera pose is currently configured through `CameraConfig`.
+
+The built-in floor, table, and lights can be disabled independently with `--no-default-floor`, `--no-default-table`, and `--no-default-lights`, or with `EnvironmentSpec` from Python.
+
+## Python episode API
+
+`VisualServoSimulation` can be used without its long-running viewer loop:
 
 ```python
 from mujoco_servo import DemoConfig, VisualServoSimulation
@@ -158,270 +283,88 @@ config = DemoConfig(
     viewer=False,
     realtime=False,
 )
-simulation = VisualServoSimulation(config)
 
-initial = simulation.get_state()
-print(initial.as_dict())
-print(simulation.get_body_position("target"))
-print(simulation.get_site_position("target_site"))
-
-summary = simulation.run()
-print(summary.final_target_position)
-print(summary.final_end_effector_position)
-print(summary.final_detected_position)
-print(summary.final_detection_anchor)
+with VisualServoSimulation(config) as simulation:
+    initial = simulation.reset()
+    for _ in range(120):
+        state = simulation.step()
+    observed = simulation.observe()
+    print(observed.as_dict())
+    print(simulation.get_body_position("target"))
+    print(simulation.get_site_position("target_site"))
 ```
 
-`get_state()` returns `target_position`, `end_effector_position`, `camera_position`, ordered `joint_positions`, the last detected position, detection backend/anchor, and detection age. `get_body_position(name)` and `get_site_position(name)` raise `KeyError` for unknown MuJoCo names.
+- `reset()` restores the initial MuJoCo and runtime state and returns a `SimulationState`.
+- `step()` advances one requested controller interval and returns a `SimulationState`.
+- `observe()`/`get_state()` return copies of simulator and accepted perception state.
+- `close()` releases renderer and perception workers and is safe to call repeatedly.
+- The context manager calls `close()` automatically.
+- `get_grasp_point()`, `activate_grasp()`, and `release_grasp()` expose explicit physical-target attachment control.
 
-The CLI prints the complete `RunSummary` as JSON. Position-related summary fields are:
+World positions are meters. Hinge positions are radians and slide positions are meters. Detection covariance/timestamps, tracking state, manipulation state, contact/grasp/lift status, target/EE/camera positions, and ordered robot joint positions are included in the public state.
 
-- `final_target_position`: simulator-truth `target_site` center;
-- `final_end_effector_position`: configured EE frame or body-point position;
-- `final_detected_position`: latest valid oracle center or RGB-D surface anchor, if any;
-- `final_detection_anchor`: `truth_center`, a surface-anchor label, or the last failure label;
-- `final_target_distance_m`: EE-to-truth-center distance;
-- `final_error_m`: final task-space error evaluated against simulator truth;
-- `final_orientation_error_rad`: front-standoff tool-axis alignment error.
+## Robot replacement
 
-## Replacing the robot
+`--robot-file` accepts a robot object, list, or `{"schema_version": 1, "robots": [...]}`. Version 1 is assumed for old descriptors. At minimum each robot declares:
 
-### Built-in robots
+- `name`, `xml_path`, and `asset_dir`;
+- ordered `joint_names`, `actuator_names`, and `home_qpos`;
+- `ee_frame` with `name`, `type`, and optional local `offset`.
 
-All built-ins come from the pinned MuJoCo Menagerie submodule:
+Optional fields include aliases, tool axis, base position, workspace detection bounds, passive actuator controls, grasp attachment body, and gripper open/close metadata. Controlled joints must be scalar hinge/slide joints with joint transmissions. Official Menagerie position actuators can be rewritten into velocity or torque mode at scene construction.
 
-| CLI name | Aliases | MJCF path below Menagerie root | Controlled joints | EE frame | Default target position |
-| --- | --- | --- | ---: | --- | --- |
-| `panda` | `franka`, `franka-panda`, `franka_emika_panda` | `franka_emika_panda/panda.xml` | 7 | body point `hand` + `[0, 0, 0.10]` | `[0.55, 0.10, 0.40]` |
-| `ur5e` | `universal-robots-ur5e`, `universal_robots_ur5e`, `ur` | `universal_robots_ur5e/ur5e.xml` | 6 | site `attachment_site` | `[-0.30, 0.45, 0.50]` |
-| `lite6` | `ufactory-lite6`, `ufactory_lite6`, `xarm-lite6` | `ufactory_lite6/lite6.xml` | 6 | site `attachment_site` | `[0.32, 0.00, 0.38]` |
+Custom MJCF currently must be a self-contained `<mujoco>` document; `<include>` is rejected. Asset paths remain external and are not copied into wheels. Full descriptor and asset rules are in [`mujoco/ASSETS.md`](mujoco/ASSETS.md).
 
-Their local tool approach axis is `+Z`. `front-standoff` aligns the configured local `tool_axis` with the horizontal direction toward the detected target.
+## Benchmark, tests, and CI
 
-### Custom robot descriptor
-
-Pass a strict JSON descriptor together with its robot name or alias:
+Run the full local suite:
 
 ```bash
-python mujoco/scripts/demo.py \
-  --robot my-arm \
-  --robot-file /path/to/my-arm/robot.json \
-  --target cup \
-  --detector oracle \
-  --headless \
-  --steps 120 \
-  --no-realtime
+python -m pytest -q mujoco/tests
+ruff check mujoco
+ruff format --check mujoco/src mujoco/tests mujoco/scripts
+coverage run --branch -m pytest -q mujoco/tests
+coverage report --fail-under=75
 ```
 
-Complete descriptor example:
-
-```json
-{
-  "name": "my-arm",
-  "xml_path": "robot.xml",
-  "asset_dir": "assets",
-  "joint_names": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"],
-  "actuator_names": ["joint1_pos", "joint2_pos", "joint3_pos", "joint4_pos", "joint5_pos", "joint6_pos"],
-  "home_qpos": [0.0, -0.7, 1.2, 0.0, 0.8, 0.0],
-  "ee_frame": {
-    "name": "tool_site",
-    "type": "site",
-    "offset": [0.0, 0.0, 0.0]
-  },
-  "tool_axis": [0.0, 0.0, 1.0],
-  "base_position": [0.0, 0.0, 0.0],
-  "passive_actuator_ctrl": {
-    "gripper_position": 0.04
-  },
-  "max_gripper_width_m": 0.08,
-  "default_target_position": [0.45, 0.0, 0.35],
-  "detection_bounds": {
-    "min": [-0.5, -0.7, 0.05],
-    "max": [0.9, 0.7, 1.0]
-  },
-  "aliases": ["my-robot"]
-}
-```
-
-The file may instead contain a list of robot objects or `{"robots": [...]}`. Custom names and aliases take priority over built-ins. `xml_path` and `asset_dir` are resolved relative to the descriptor file. `passive_actuator_ctrl` may be the object map shown above or a list such as `[{"name": "gripper_position", "value": 0.04}]`. `detection_bounds` may be the `min`/`max` object shown above or `[[min_x, min_y, min_z], [max_x, max_y, max_z]]`. Optional `tool_axis` is normalized and must be non-zero; its coordinates are local to the EE frame. Optional `base_position` defaults to world `[0, 0, 0]` and defines the horizontal approach direction and automatic camera side view for a translated robot installation.
-
-Custom robot requirements:
-
-- The MJCF must be a self-contained XML file whose root is `<mujoco>`. `<include>` is rejected because the scene is injected in memory.
-- Every controlled joint must be a named scalar hinge or slide joint.
-- `joint_names`, `actuator_names`, and `home_qpos` must have equal non-zero lengths and contain no duplicates.
-- Each controlled actuator must transmit the corresponding joint and behave as a non-degenerate position servo. Scalar transmission gear is applied automatically; generic torque/motor and velocity semantics are rejected.
-- A single unnamed joint actuator may receive its descriptor name deterministically; an incorrect name for an already named actuator is rejected. Every home position must fit both the joint range and its actuator control range.
-- `ee_frame.type` must be `site`, `body`, or `body_point`. `offset` is applied only for `body_point` and is expressed in that body's local frame.
-- The asset directory must exist and supplies the effective MJCF `meshdir`. Texture lookup preserves the source compiler's `texturedir`/`assetdir` semantics (or the XML directory when neither is set), while all effective directories are made absolute before in-memory compilation. The injected visual scene forces `strippath=false` and `discardvisual=false` so custom targets are not stripped or discarded.
-- Injected object names are reserved within their MuJoCo namespaces: bodies `camera_marker`/`target`, site `target_site`, the configured camera name, and the documented `servo_`/`target_geom`/`target_mesh` names. A collision fails early with a clear rename error instead of a MuJoCo duplicate-name failure.
-- `passive_actuator_ctrl` entries must not overlap controlled actuators and are held at their configured constants.
-- `detection_bounds` is strongly recommended. Without it, detections are only bounded to the broad world cube `[-5, 5]` meters; with it, target keyboard motion is also clipped to the configured workspace.
-- The loader validates structure, finite values, lengths, duplicates, paths, and bound ordering, but it cannot prove reachability, actuator tuning, collision safety, or control stability for an arbitrary model.
-
-## Replacing the target
-
-`--target` selects a built-in or custom target model. Unknown target names are rejected rather than silently replaced with a generic box. A target JSON file may contain a list or `{"targets": [...]}`; custom exact names and aliases take priority.
-
-Supported size conventions:
-
-| Shape | `size` meaning |
-| --- | --- |
-| `box` | full X, Y, Z extents |
-| `sphere` | three equal full diameters |
-| `cylinder` | equal X/Y full diameter and full Z height |
-| `capsule` | equal X/Y full diameter and full end-to-end Z height; height must exceed diameter |
-| `mesh` | required approximate full bounding box used as target metadata; actual geometry comes from mesh plus scale |
-| `compound` | approximate full bounding box for the assembled object; geometry comes from `parts` |
-
-Primitive target:
-
-```json
-{
-  "targets": [
-    {
-      "name": "banana-proxy",
-      "shape": "capsule",
-      "size": [0.04, 0.04, 0.16],
-      "rgba": [0.95, 0.78, 0.12, 1.0],
-      "aliases": ["yellow banana"],
-      "base_position": [0.48, 0.0, 0.38]
-    }
-  ]
-}
-```
-
-Compound target:
-
-```json
-{
-  "targets": [
-    {
-      "name": "marker-tool",
-      "shape": "compound",
-      "size": [0.18, 0.06, 0.08],
-      "rgba": [0.85, 0.20, 0.15, 1.0],
-      "base_position": [0.50, 0.0, 0.40],
-      "parts": [
-        {
-          "shape": "capsule",
-          "size": [0.025, 0.025, 0.16],
-          "pos": [0.0, 0.0, 0.0],
-          "quat": [0.7071, 0.0, 0.7071, 0.0]
-        },
-        {
-          "shape": "box",
-          "size": [0.06, 0.06, 0.04],
-          "offset": [0.08, 0.0, 0.0],
-          "rgba": [0.20, 0.35, 0.90, 1.0]
-        }
-      ]
-    }
-  ]
-}
-```
-
-OBJ or STL mesh target:
-
-```json
-{
-  "targets": [
-    {
-      "name": "mesh-cup",
-      "shape": "mesh",
-      "size": [0.10, 0.08, 0.12],
-      "mesh_file": "meshes/cup.obj",
-      "scale": [1.0, 1.0, 1.0],
-      "rgba": [0.90, 0.18, 0.12, 1.0],
-      "aliases": ["custom red cup"],
-      "base_position": [0.50, 0.0, 0.40]
-    }
-  ]
-}
-```
-
-Mesh paths are resolved relative to the target JSON file, must exist, and must end in `.obj` or `.stl`. `mesh_path` is accepted as an alias for `mesh_file`; `mesh_scale` is accepted as an alias for `scale`, but each pair is mutually exclusive. Mesh parts are also allowed inside `compound` and use the same `mesh_file`/`scale` fields. A part accepts `shape`, `size`, exactly one of `pos` or `offset`, optional `rgba`, and optional normalized WXYZ `quat`.
-
-All numeric values must be finite; dimensions and mesh scales must be positive; RGBA values must be in `[0, 1]`; names and aliases must be unique; unknown fields are rejected. For reliable color perception, set the target's top-level `rgba` to the dominant rendered surface color even when individual compound parts override it.
-
-Select custom geometry independently from the semantic phrase:
+Run a reproducible oracle matrix and write its JSON report:
 
 ```bash
-python mujoco/scripts/demo.py \
-  --target mesh-cup \
-  --target-file /path/to/targets.json \
-  --prompt "red ceramic mug" \
-  --detector semantic
+mujoco-servo-benchmark \
+  --robots panda ur5e lite6 \
+  --actuator-modes position velocity torque \
+  --trajectories static circle \
+  --seeds 7 \
+  --steps 1200 \
+  --output /tmp/mujoco-servo-benchmark.json
 ```
 
-## Tasks and controls
+`--enforce` returns nonzero if any configured position/orientation threshold is missed. Static scenarios use final error; moving scenarios use RMS over the second half of the episode so startup transients do not masquerade as tracking error. Orientation is gated only for `front-standoff`. Inspect each scenario's `acceptance` object when changing tasks or thresholds.
 
-Tasks:
+GitHub Actions runs Python 3.10–3.13 on Ubuntu with EGL, Ruff formatting/linting, branch coverage of at least 75%, wheel construction, and an installed-wheel oracle smoke test.
 
-- `front-standoff` (default): hold the requested horizontal distance and align the robot's local `tool_axis` toward the target;
-- `standoff`: hold the requested distance along the current EE-to-target direction;
-- `contact`: command the EE control point to the target center/surface anchor, without physical collision semantics;
-- `align-x`, `align-y`, `align-z`: adjust one Cartesian coordinate using `align_offset_m` from the Python API.
+## Wheel and external assets
 
-Use `--standoff-cm` for CLI distances or `--standoff` in meters. If both are supplied, `--standoff` takes precedence.
-
-Viewer target controls:
-
-- Arrow keys move the target horizontally.
-- `,` moves it down and `.` moves it up.
-- Space or Backspace resets the manual offset.
-- `--scripted-target` disables keyboard offsets.
-- Standard MuJoCo mouse orbit, pan, and zoom remain available.
-
-Useful options include `--camera-fps`, `--camera-width`, `--camera-height`, `--detection-timeout`, `--debug-perception`, `--no-camera-overlay`, `--overlay-width-frac`, `--seed`, and `--list-targets`. Run `python mujoco/scripts/demo.py --help` for the authoritative CLI list.
-
-When `CameraConfig` keeps its default pose, `VisualServoSimulation` places the camera to the side of the base-to-target approach line so a swapped robot is less likely to occlude the target. Supplying a non-default `CameraConfig(position=..., lookat=...)` preserves that absolute world pose. The camera remains fixed after scene construction; this is not eye-in-hand control.
-
-## Validation
-
-After installing `mujoco[test]`:
+A wheel contains simulator code, not Menagerie or user meshes. Point an installed wheel at a Menagerie checkout before importing the package:
 
 ```bash
-python -m pytest mujoco/tests
-
-python mujoco/scripts/demo.py \
-  --headless \
-  --detector oracle \
-  --robot panda \
-  --target cup \
-  --trajectory static \
-  --steps 240 \
-  --no-realtime
+export MUJOCO_MENAGERIE_PATH=/absolute/path/to/mujoco_menagerie
+python -m mujoco_servo --headless --detector oracle --steps 2 --no-realtime
 ```
 
-With a working offscreen OpenGL context:
+## Current limits
 
-```bash
-python mujoco/scripts/demo.py \
-  --headless \
-  --detector color \
-  --robot panda \
-  --target cup \
-  --trajectory static \
-  --steps 240 \
-  --camera-fps 6 \
-  --no-realtime
-```
-
-After installing `mujoco[semantic,test]` and allowing model downloads, replace `--detector color` with `--detector semantic` and add an appropriate `--prompt` for an integration smoke test.
-
-## Current limitations
-
-- The automatically framed camera is fixed in the world after scene construction; eye-in-hand camera mounting and camera calibration/noise models are not implemented.
-- Color segmentation assumes a controlled rendering and a representative top-level target color. It is not a general real-world color recognizer.
-- Semantic quality depends on the selected models, prompt, scene, cache/network availability, and hardware. Base tests mock model inference rather than downloading weights.
-- RGB-D visual anchors describe the visible surface, while oracle describes the target origin. The system does not estimate an occluded object center from a complete 3D model.
-- Relative monocular depth is intentionally diagnostic-only. There is no scale-free controller for non-metric depth.
-- Targets are mocap-controlled, visual, and non-colliding. Physical grasping, contact forces, target dynamics, and obstacle avoidance are out of scope.
-- Custom robot support is descriptor-driven and intentionally strict; MJCF files with `<include>`, multi-DoF free/ball controlled joints, torque-only actuation, or incompatible EE conventions require adaptation.
-- A Python wheel does not bundle Menagerie or user assets. Built-in robots need `MUJOCO_MENAGERIE_PATH`; custom assets need `--robot-file`/`--target-file` paths that remain available at runtime.
-- GUI layout and input still need a local viewer smoke test, especially on macOS.
+- There is no real-camera/real-robot transport, ROS/ROS 2 integration, hardware safety layer, or hardware calibration workflow in the MuJoCo implementation.
+- Multi-object detection, association, and simultaneous multi-arm/multi-target control are intentionally deferred; one selected target is controlled per simulation.
+- Semantic quality and latency depend on model weights, prompt, hardware, and cache/network availability. Routine tests mock large-model inference.
+- Eye-in-hand mounting and synthetic noise are implemented, but camera intrinsic/extrinsic calibration estimation and distortion simulation are not.
+- Grasp attachment is a deterministic weld/suction abstraction. General grasp synthesis, tactile sensing, force closure, slip, and contact-force control are not implemented.
+- The controller does not perform global collision-aware motion planning or obstacle avoidance.
+- Monocular relative depth remains diagnostic-only unless metric calibration succeeds.
+- Custom robots require compatible scalar joints, actuator transmissions, EE conventions, and a self-contained MJCF. Descriptor validation cannot prove reachability or stability.
+- Custom target geometry is limited to primitives, compounds, OBJ, and STL; textured semantic realism depends on user-provided scene assets.
+- Wheels do not embed Menagerie or user assets.
 
 ## MATLAB archive
 
-The MATLAB directory contains earlier calibration, fixed-camera, eye-in-hand, and real-camera experiments, plus `matlab/report.md`. It is frozen and intentionally excluded from the active MuJoCo implementation, bug-fix, and acceptance scope.
+`matlab/` contains earlier calibration, fixed-camera, eye-in-hand, and real-camera experiments. It is frozen and intentionally excluded from current implementation and acceptance scope.

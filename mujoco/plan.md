@@ -1,145 +1,115 @@
-# MuJoCo visual-servo implementation status
+# MuJoCo visual-servo status and roadmap
 
 ## Scope
 
-`mujoco/` is the active project. The MATLAB implementation is frozen historical work and is not part of this plan's implementation or acceptance scope.
+`mujoco/` is the active project. `matlab/` is frozen historical work and excluded from implementation and acceptance.
 
-The current objective is a configurable MuJoCo RGB-D visual-servo simulator that can:
+The current simulator provides target position access, color and semantic RGB-D tracking, replaceable robot and target assets, three actuator modes, physical target contact, executable grasp points, reusable episode APIs, benchmarks, and CI.
 
-1. expose simulator positions;
-2. track controlled targets by color;
-3. track open-vocabulary targets with optional semantic models;
-4. replace the robot through validated model descriptors;
-5. replace the visual target through validated primitive, compound, or mesh descriptors.
+## Implemented baseline
 
-The default demo is `panda + cup + color + MuJoCo metric depth + front-standoff`.
+### Simulation API
 
-## Implemented
-
-### Simulator state
-
-- `VisualServoSimulation.get_state()` returns simulator time, target, end-effector, camera, joints, and last detection state.
-- `get_body_position(name)` and `get_site_position(name)` expose named MuJoCo world positions.
-- `RunSummary` includes final truth target, EE, detected position, detection anchor, target distance, task error, and orientation error.
-- Oracle truth is read back from `target_site`; it is not copied directly from the trajectory command.
+- `VisualServoSimulation.reset()`, `step()`, `observe()`/`get_state()`, and idempotent `close()`.
+- Context-manager cleanup.
+- Named body/site world-position reads.
+- State and summary metrics for truth/detected positions, tracking loss/reacquisition, timing, depth quality, saturation, RMS/P95 error, and settling time.
 
 ### Perception and depth
 
-- `color` is the default lightweight backend and segments the configured target color from rendered RGB.
-- `semantic` lazily loads Grounding DINO and SAM, then reuses a local mask/color/depth tracker between redetections.
-- `oracle` reports the simulated target center and is reserved for controller/debug acceptance.
-- Color and semantic backends estimate a visible RGB-D surface anchor.
-- MuJoCo metric depth is the default. Depth Anything V2 is optional and can attempt metric calibration from a MuJoCo hint.
-- Non-metric depth does not produce a control target.
-- Camera sampling is throttled in viewer and headless modes.
-- A configurable detection timeout discards stale visual targets and causes joint hold; non-oracle modes do not fall back to simulator truth.
+- Default controlled-scene color segmentation.
+- Optional Grounding DINO + SAM semantic detection with local tracking.
+- MuJoCo metric depth and optional Depth Anything V2.
+- No truth fallback in visual modes; stale/lost observations produce a latched hold.
+- Explicit reacquisition confirmation, observation latency/jitter/drop simulation, and camera RGB/depth noise/dropout.
+- CUDA, then Apple MPS, then CPU automatic model-device selection.
 
-### Controller and tasks
+### Camera and environment
 
-- Resolved-rate Cartesian position control uses damped pseudoinverses, joint/EE speed limits, joint-limit clamping, and a null-space home posture.
-- `front-standoff` is the default task and aligns the robot descriptor's local `tool_axis` toward the target while maintaining horizontal distance.
-- `contact`, general `standoff`, and `align-x/y/z` remain available.
-- The controller accepts named scalar hinge/slide joints and joint-position actuator commands.
+- Robot-workspace-aware fixed camera.
+- Optional body-mounted eye-in-hand camera.
+- Independently configurable default floor, table, and lights.
+- Passive viewer and camera overlay; macOS viewer runs through `mjpython`.
 
-### Robot replacement
+### Robots and control
 
-- Built-ins: Menagerie Panda, UR5e, and Lite6.
-- `MUJOCO_MENAGERIE_PATH` overrides the source-tree Menagerie root.
-- `--robot-file` accepts a strict JSON robot object, list, or `{"robots": [...]}` wrapper.
-- Relative XML and asset paths resolve from the descriptor.
-- The loader validates required/unknown fields, lengths, duplicates, finite values, paths, EE frame type, passive controls, workspace bounds, optional world base position, and non-zero normalized tool axis.
-- Custom names and aliases take priority over built-ins.
-- Scene injection rejects MJCF `<include>` and requires a self-contained `<mujoco>` root.
+- Pinned Menagerie Panda, UR5e, and Lite6.
+- Version-1 strict custom robot descriptors with legacy unversioned compatibility.
+- Resolved-rate Cartesian tracking with adaptive damping, joint-limit avoidance, null-space posture, speed/acceleration limits, and saturation metrics.
+- Position, velocity, and torque actuation for all three built-ins.
+- Torque bias compensation and joint-space PD; velocity bias-force feed-forward.
+- Touch/grasp staged task workflow and deterministic weld/suction attachment abstraction.
+- Panda finger actuator metadata plus attachment metadata for gripperless UR5e/Lite6 models.
 
-### Target replacement
+### Targets
 
-- Built-in primitive and compound target library with strict name/phrase resolution.
-- `--target-file` accepts a strict list or `{"targets": [...]}` wrapper.
-- Supported target geometry: box, sphere, cylinder, capsule, compound parts, and external OBJ/STL mesh targets or parts.
-- Relative mesh paths resolve from the target descriptor; dimensions, scales, colors, quaternions, duplicates, and unknown fields are validated.
-- `--prompt` separates semantic wording from selected simulated geometry.
+- Primitive, compound, OBJ, and STL target geometry.
+- Version-1 strict descriptors with legacy compatibility.
+- Visual mocap reference mode and colliding physical free-body mode.
+- Body orientation, mass, friction, automatic mesh AABB, and target-local named grasp points.
+- Runtime grasp-point world transforms and attachment activation/deactivation.
 
-### Runtime and viewer
+### Engineering
 
-- Robot-workspace-aware side framing for a world-fixed RGB-D camera, plus a passive MuJoCo viewer; an explicit non-default `CameraConfig` pose is preserved.
-- Top-right overlay displays RGB, mask, box, centroid, backend, anchor, score, prompt label, and depth status.
-- Standard viewer camera mouse controls remain intact.
-- Arrow/comma/period keyboard target motion is workspace-clamped when robot bounds are available.
-- macOS viewer launch is supported through `mjpython`; other platforms use standard Python.
+- Conda and venv installation paths.
+- Python 3.10–3.13 EGL CI.
+- Ruff lint/format checks, at least 75% branch coverage, wheel build, and installed-wheel smoke test.
+- Reproducible multi-robot/multi-trajectory benchmark JSON reports.
 
-### Packaging and tests
-
-- Package version: `0.3.0`, Python `>=3.10`.
-- Base dependencies contain MuJoCo, NumPy, and OpenCV.
-- `test` extra installs pytest; `semantic` adds PyTorch, Pillow, and Transformers 4.x.
-- Tests cover configuration validation, descriptor parsing, scene/model replacement, target schemas, position APIs, control behavior, perception/depth units, CLI errors, and runtime smoke paths.
-
-## Acceptance commands
+## Acceptance
 
 From the repository root:
 
 ```bash
 git submodule update --init --recursive mujoco/vendor/mujoco_menagerie
+conda env create -f environment.yml
+conda activate visual_servo
 
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e "mujoco[test]"
-python -m pytest mujoco/tests
+ruff check mujoco
+ruff format --check mujoco/src mujoco/tests mujoco/scripts
+coverage run --branch -m pytest -q mujoco/tests
+coverage report --fail-under=75
 ```
 
-Display-independent controller and position smoke test:
+Controller smoke:
 
 ```bash
-python mujoco/scripts/demo.py \
-  --headless \
-  --detector oracle \
-  --robot panda \
-  --target cup \
-  --trajectory static \
-  --steps 240 \
-  --no-realtime
+python -m mujoco_servo \
+  --headless --no-realtime \
+  --detector oracle --trajectory static \
+  --robot panda --target cup \
+  --actuator-mode position --steps 240
 ```
 
-Color integration test, only where offscreen OpenGL is available:
+Benchmark report:
 
 ```bash
-python mujoco/scripts/demo.py \
-  --headless \
-  --detector color \
-  --robot panda \
-  --target cup \
-  --trajectory static \
-  --steps 240 \
-  --camera-fps 6 \
-  --no-realtime
+mujoco-servo-benchmark \
+  --robots panda ur5e lite6 \
+  --actuator-modes position velocity torque \
+  --trajectories static circle \
+  --seeds 7 --steps 1200 \
+  --output /tmp/mujoco-servo-benchmark.json
 ```
 
-Semantic integration requires:
+Benchmark thresholds are configurable gates. Static runs use final error and moving runs use second-half steady-state RMS; `front-standoff` additionally checks orientation. Use `--enforce` after choosing limits appropriate to the selected robot, trajectory, task, and actuator mode.
 
-```bash
-python -m pip install -e "mujoco[semantic,test]"
-```
+## Known boundaries
 
-Then run the color command with `--detector semantic --prompt "red mug"`, allowing Hugging Face model access or providing cached/local model paths.
+- No real-camera or real-robot driver, ROS/ROS 2 transport, hardware safety layer, or real-system calibration is implemented.
+- One selected target is controlled per simulation. Multi-object detection/association and simultaneous multi-target control are deferred.
+- Semantic production inference depends on large external weights, prompt quality, cache/network availability, and hardware; routine tests mock the heavy models.
+- Eye-in-hand mounting and noise injection do not replace a calibrated lens/distortion and hand-eye calibration model.
+- Weld/suction attachment is deterministic task scaffolding, not general grasp synthesis, tactile feedback, slip, or force-closure validation.
+- No global collision-aware motion planner or obstacle avoidance layer is present.
+- Learned relative monocular depth cannot control metric Cartesian motion unless calibration succeeds.
+- Custom robot MJCF must remain self-contained and use compatible scalar joint transmissions; `<include>`, ball/free controlled joints, and arbitrary actuator semantics require adaptation.
+- Wheels contain code only. Menagerie and user assets remain external.
 
-## Honest limitations
+## Deferred priorities
 
-- The camera is automatically framed but remains fixed in the world; eye-in-hand mounting, calibration error, sensor noise, and real-camera input are not implemented.
-- RGB-D detections estimate a visible surface, not the occluded object center. Oracle and image-based target positions therefore differ by design.
-- Non-metric monocular depth is diagnostic-only and cannot drive the Cartesian controller.
-- Target geoms are mocap-controlled and non-colliding. `contact` is center-point tracking, not physical contact, grasping, or force control.
-- Color recognition assumes a controlled synthetic scene and representative configured RGBA.
-- Semantic recognition depends on model quality, prompt, downloads/cache, hardware, and scene composition; base tests do not download production weights.
-- Custom robots must use self-contained MJCF, scalar controlled joints, compatible position actuators, and a meaningful EE descriptor. Reachability and stability cannot be proven from JSON alone.
-- Custom target meshes are limited to OBJ/STL and require correct user-provided scale/origin and licensing.
-- Wheels contain code only. Menagerie and user assets must remain externally accessible at runtime.
-- RGB-D headless runs still need an offscreen OpenGL context; oracle runs do not.
-- Physical obstacle avoidance, self-collision-aware planning, grasp synthesis, occlusion reasoning, and real-world transfer are not implemented.
-
-## Next work, if the scope expands
-
-1. Add eye-in-hand camera descriptors and calibrated camera/noise models.
-2. Add physical target bodies and contact/force-aware grasp tasks separate from the current visual reference target.
-3. Add collision-aware Cartesian planning and singularity/reachability diagnostics for arbitrary robot descriptors.
-4. Add opt-in cached-model semantic integration tests on suitable GPU/GL infrastructure.
-5. Add model-based object-center estimation when full object geometry and pose are available.
+1. Define and validate a real hardware/ROS boundary only after selecting an actual robot, camera, and safety architecture.
+2. Add calibrated camera distortion, hand-eye uncertainty, and sim-to-real observation models.
+3. Add collision-aware planning and physically evaluated grasp quality if manipulation, rather than visual tracking, becomes the primary objective.
+4. Add opt-in cached-weight semantic integration jobs on suitable GPU hardware.
+5. Add multi-object association only when a concrete multi-target task and metric are defined.

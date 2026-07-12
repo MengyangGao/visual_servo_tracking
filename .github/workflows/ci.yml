@@ -1,0 +1,53 @@
+name: MuJoCo CI
+
+on:
+  push:
+    paths:
+      - "mujoco/**"
+      - "README.md"
+      - "environment.yml"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "mujoco/**"
+      - "README.md"
+      - "environment.yml"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    env:
+      MUJOCO_GL: egl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: mujoco/pyproject.toml
+      - name: Install system OpenGL libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1-mesa-dri
+      - name: Install project
+        run: python -m pip install --upgrade pip && python -m pip install -e "mujoco[test,dev]"
+      - name: Lint
+        run: ruff check mujoco && ruff format --check mujoco/src mujoco/tests mujoco/scripts
+      - name: Test
+        run: coverage run --branch -m pytest -q mujoco/tests
+      - name: Coverage
+        run: coverage report --fail-under=75
+      - name: Build wheel
+        if: matrix.python-version == '3.11'
+        run: python -m build --wheel --outdir /tmp/mujoco-servo-dist mujoco
+      - name: Installed wheel smoke test
+        if: matrix.python-version == '3.11'
+        run: |
+          python -m pip install --force-reinstall --no-deps /tmp/mujoco-servo-dist/*.whl
+          MUJOCO_MENAGERIE_PATH="$PWD/mujoco/vendor/mujoco_menagerie" python -m mujoco_servo --headless --detector oracle --trajectory static --steps 2 --no-realtime

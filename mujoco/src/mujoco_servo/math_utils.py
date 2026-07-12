@@ -73,8 +73,13 @@ def rotation_matrix_to_quat_wxyz(rotation: np.ndarray) -> np.ndarray:
     return quat / max(float(np.linalg.norm(quat)), 1e-9)
 
 
-def look_at_xyaxes(camera_pos: np.ndarray, target_pos: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    forward = normalize(np.asarray(target_pos, dtype=float) - np.asarray(camera_pos, dtype=float), np.array([1.0, 0.0, 0.0]))
+def look_at_xyaxes(
+    camera_pos: np.ndarray, target_pos: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    forward = normalize(
+        np.asarray(target_pos, dtype=float) - np.asarray(camera_pos, dtype=float),
+        np.array([1.0, 0.0, 0.0]),
+    )
     up_hint = np.array([0.0, 0.0, 1.0], dtype=float)
     right = normalize(np.cross(forward, up_hint), np.array([1.0, 0.0, 0.0]))
     up = normalize(np.cross(right, forward), np.array([0.0, 0.0, 1.0]))
@@ -89,8 +94,13 @@ def clamp_norm(vector: np.ndarray, max_norm: float) -> np.ndarray:
     return value * (float(max_norm) / norm)
 
 
-def rotation_error_vector(desired_world_from_body: np.ndarray, current_world_from_body: np.ndarray) -> np.ndarray:
-    error = np.asarray(desired_world_from_body, dtype=float).reshape(3, 3) @ np.asarray(current_world_from_body, dtype=float).reshape(3, 3).T
+def rotation_error_vector(
+    desired_world_from_body: np.ndarray, current_world_from_body: np.ndarray
+) -> np.ndarray:
+    error = (
+        np.asarray(desired_world_from_body, dtype=float).reshape(3, 3)
+        @ np.asarray(current_world_from_body, dtype=float).reshape(3, 3).T
+    )
     # The usual skew(R)/(2 sin(theta)) formula collapses to a zero vector at
     # exactly 180 degrees.  Converting the relative rotation to a quaternion
     # keeps a well-defined axis at pi and is also stable for small angles.
@@ -104,7 +114,9 @@ def rotation_error_vector(desired_world_from_body: np.ndarray, current_world_fro
     return quat[1:] * (angle / vector_norm)
 
 
-def vector_alignment_error(current_world: np.ndarray, desired_world: np.ndarray) -> np.ndarray:
+def vector_alignment_error(
+    current_world: np.ndarray, desired_world: np.ndarray
+) -> np.ndarray:
     """Return the shortest world-frame rotation aligning one direction to another."""
     current = normalize(current_world, np.array([0.0, 0.0, 1.0]))
     desired = normalize(desired_world, np.array([0.0, 0.0, 1.0]))
@@ -123,9 +135,14 @@ def vector_alignment_error(current_world: np.ndarray, desired_world: np.ndarray)
     return axis * math.atan2(cross_norm, dot)
 
 
-def tool_z_facing_rotation(forward_world: np.ndarray, up_hint: np.ndarray | None = None) -> np.ndarray:
+def tool_z_facing_rotation(
+    forward_world: np.ndarray, up_hint: np.ndarray | None = None
+) -> np.ndarray:
     z_axis = normalize(forward_world, np.array([1.0, 0.0, 0.0]))
-    up = normalize(np.array([0.0, 0.0, 1.0]) if up_hint is None else up_hint, np.array([0.0, 0.0, 1.0]))
+    up = normalize(
+        np.array([0.0, 0.0, 1.0]) if up_hint is None else up_hint,
+        np.array([0.0, 0.0, 1.0]),
+    )
     x_axis = normalize(np.cross(up, z_axis), np.array([1.0, 0.0, 0.0]))
     y_axis = normalize(np.cross(z_axis, x_axis), np.array([0.0, 0.0, 1.0]))
     return np.column_stack([x_axis, y_axis, z_axis])
