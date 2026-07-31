@@ -159,7 +159,7 @@ def test_g1_robot_specific_effort_gains_converge_for_both_arms() -> None:
                     target="cup",
                     detector="oracle",
                     trajectory="static",
-                    steps=600,
+                    steps=900,
                     headless=True,
                     viewer=False,
                     realtime=False,

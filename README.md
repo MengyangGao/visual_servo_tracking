@@ -4,7 +4,7 @@
 
 ![Panda 跟随移动目标](mujoco/media/visual-servo-dashboard.gif)
 
-这段 15 秒录屏使用 Panda、固定 RGB-D 相机、颜色分割和 Hybrid 视觉伺服。红色杯子沿圆周移动，机械臂默认保持 `10 cm` 距离；控制器只使用视觉观测更新末端目标，没有用 oracle 代替检测。录制期间完成 360 次视觉更新，没有发生跟踪丢失，稳态 RMS 跟随误差为 `11.9 mm`。下载原始画质：[MP4](mujoco/media/visual-servo-dashboard.mp4) · [PNG](mujoco/media/visual-servo-dashboard.png)
+这段 15 秒录屏使用 Panda、固定 RGB-D 相机、颜色分割和 Hybrid 视觉伺服。红色杯子沿圆周移动，机械臂锁定接近方向并保持 `10 cm` 距离，目标平移多少，末端就跟随平移多少。控制器只使用视觉观测，没有用 oracle 代替检测。录制期间完成 360 次视觉更新，没有发生跟踪丢失；稳态 RMS 跟随误差为 `2.2 mm`，P95 为 `3.3 mm`，目标与末端的路径长度比例为 `1.020`。下载原始画质：[MP4](mujoco/media/visual-servo-dashboard.mp4) · [PNG](mujoco/media/visual-servo-dashboard.png)
 
 ## 项目包含什么
 

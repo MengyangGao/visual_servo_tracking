@@ -160,14 +160,15 @@ class RobotSpec:
     aliases: tuple[str, ...] = ()
     tool_axis: tuple[float, float, float] = (0.0, 0.0, 1.0)
     base_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    preferred_standoff_direction: tuple[float, float, float] | None = None
     grasp_attachment_body: str | None = None
     gripper_actuator_names: tuple[str, ...] = ()
     gripper_open_ctrl: tuple[float, ...] = ()
     gripper_closed_ctrl: tuple[float, ...] = ()
     gripper_contact_bodies: tuple[str, ...] = ()
     fixed_base: bool = False
-    torque_gain_scale: tuple[float, float] = (1.0, 1.0)
-    impedance_gain_scale: tuple[float, float] = (1.0, 1.0)
+    torque_gain_scale: tuple[float, float] = (1.0, 2.0)
+    impedance_gain_scale: tuple[float, float] = (1.0, 2.0)
     schema_version: int = 1
 
     @property
@@ -207,6 +208,7 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         default_target_position=(0.55, 0.10, 0.40),
         detection_bounds=((0.05, -0.55, 0.05), (0.85, 0.55, 0.85)),
         aliases=("franka", "franka-panda", "franka_emika_panda"),
+        preferred_standoff_direction=(-0.4685, -0.2595, 0.8445),
         grasp_attachment_body="hand",
         gripper_actuator_names=("actuator8",),
         gripper_open_ctrl=(255.0,),
@@ -344,6 +346,8 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         detection_bounds=((-1.2, -0.9, 0.03), (0.8, 1.2, 1.4)),
         aliases=("universal-robots-ur10e", "universal_robots_ur10e"),
         grasp_attachment_body="wrist_3_link",
+        torque_gain_scale=(1.0, 3.0),
+        impedance_gain_scale=(1.0, 3.0),
     ),
     "sawyer": RobotSpec(
         name="sawyer",
@@ -385,13 +389,13 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         ee_frame_name="right_wrist_yaw_link",
         ee_frame_type="body_point",
         ee_frame_offset=(0.055, 0.0, 0.0),
-        default_target_position=(0.42, -0.32, 1.05),
+        default_target_position=(0.36, -0.27, 0.98),
         detection_bounds=((-0.5, -0.9, 0.4), (0.9, 0.4, 1.8)),
         aliases=("unitree-g1", "unitree_g1", "g1"),
         grasp_attachment_body="right_wrist_yaw_link",
         fixed_base=True,
-        torque_gain_scale=(0.10, 0.4),
-        impedance_gain_scale=(0.35, 0.5),
+        torque_gain_scale=(0.10, 0.8),
+        impedance_gain_scale=(0.35, 1.0),
     ),
     "g1-left-arm": RobotSpec(
         name="g1-left-arm",
@@ -419,13 +423,13 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         ee_frame_name="left_wrist_yaw_link",
         ee_frame_type="body_point",
         ee_frame_offset=(0.055, 0.0, 0.0),
-        default_target_position=(0.42, 0.32, 1.05),
+        default_target_position=(0.36, 0.27, 0.98),
         detection_bounds=((-0.5, -0.4, 0.4), (0.9, 0.9, 1.8)),
         aliases=("unitree-g1-left", "unitree_g1_left", "g1-left"),
         grasp_attachment_body="left_wrist_yaw_link",
         fixed_base=True,
-        torque_gain_scale=(0.10, 0.4),
-        impedance_gain_scale=(0.35, 0.5),
+        torque_gain_scale=(0.10, 0.8),
+        impedance_gain_scale=(0.35, 1.0),
     ),
 }
 
@@ -864,6 +868,7 @@ _ROBOT_OPTIONAL_FIELDS = {
     "aliases",
     "tool_axis",
     "base_position",
+    "preferred_standoff_direction",
     "grasp_attachment_body",
     "gripper_actuator_names",
     "gripper_open_ctrl",
@@ -997,6 +1002,12 @@ def _robot_from_mapping(entry: dict[str, Any], base_dir: Path, index: int) -> Ro
         3,
         f"robot '{name}'.base_position",
     )
+    preferred_standoff_direction = entry.get("preferred_standoff_direction")
+    if preferred_standoff_direction is not None:
+        preferred_standoff_direction = _parse_direction(
+            preferred_standoff_direction,
+            f"robot '{name}'.preferred_standoff_direction",
+        )
     grasp_attachment_body = entry.get("grasp_attachment_body")
     if grasp_attachment_body is not None:
         grasp_attachment_body = _json_text(
@@ -1026,11 +1037,11 @@ def _robot_from_mapping(entry: dict[str, Any], base_dir: Path, index: int) -> Ro
     if not isinstance(fixed_base, bool):
         raise ValueError(f"robot '{name}'.fixed_base must be a boolean")
     torque_gain_scale = _parse_gain_scale(
-        entry.get("torque_gain_scale", [1.0, 1.0]),
+        entry.get("torque_gain_scale", [1.0, 2.0]),
         f"robot '{name}'.torque_gain_scale",
     )
     impedance_gain_scale = _parse_gain_scale(
-        entry.get("impedance_gain_scale", [1.0, 1.0]),
+        entry.get("impedance_gain_scale", [1.0, 2.0]),
         f"robot '{name}'.impedance_gain_scale",
     )
 
@@ -1059,6 +1070,7 @@ def _robot_from_mapping(entry: dict[str, Any], base_dir: Path, index: int) -> Ro
         aliases=aliases,
         tool_axis=tool_axis,
         base_position=robot_base_position,
+        preferred_standoff_direction=preferred_standoff_direction,
         grasp_attachment_body=grasp_attachment_body,
         gripper_actuator_names=gripper_actuator_names,
         gripper_open_ctrl=gripper_open_ctrl,
@@ -1240,7 +1252,10 @@ def _parse_detection_bounds(
 
 
 def _parse_tool_axis(value: Any, robot_name: str) -> tuple[float, float, float]:
-    field_name = f"robot '{robot_name}'.tool_axis"
+    return _parse_direction(value, f"robot '{robot_name}'.tool_axis")
+
+
+def _parse_direction(value: Any, field_name: str) -> tuple[float, float, float]:
     axis = np.asarray(_json_number_vector(value, 3, field_name), dtype=float)
     norm = float(np.linalg.norm(axis))
     if norm <= 1e-9:

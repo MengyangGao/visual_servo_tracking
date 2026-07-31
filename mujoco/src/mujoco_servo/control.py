@@ -41,6 +41,7 @@ def desired_ee_position(
     ee_position: np.ndarray,
     config: ControllerConfig,
     front_origin: np.ndarray | tuple[float, float, float] | None = None,
+    standoff_direction_world: np.ndarray | None = None,
 ) -> np.ndarray:
     target = np.asarray(target_position, dtype=float).reshape(3)
     ee = np.asarray(ee_position, dtype=float).reshape(3)
@@ -48,7 +49,12 @@ def desired_ee_position(
     if mode in {"contact", "touch", "grasp", "pick-place"}:
         return target.copy()
     if mode == "standoff":
-        direction = normalize(ee - target, np.array([-1.0, 0.0, 0.0]))
+        direction = normalize(
+            ee - target
+            if standoff_direction_world is None
+            else np.asarray(standoff_direction_world, dtype=float).reshape(3),
+            np.array([-1.0, 0.0, 0.0]),
+        )
         return target + direction * float(config.standoff_m)
     if mode == "front-standoff":
         origin = (
@@ -101,6 +107,7 @@ class ResolvedRateController:
         self.ee_frame_offset = np.asarray(ee_frame_offset, dtype=float).reshape(3)
         self.config = config
         self._filtered_target: np.ndarray | None = None
+        self._standoff_direction_world: np.ndarray | None = None
         self._joint_ids = [
             mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
             for name in robot.joint_names
@@ -180,9 +187,43 @@ class ResolvedRateController:
         self._qpos_command = np.array(data.qpos[self._qpos_adr], dtype=float)
         self._last_qvel_command = np.zeros(len(self._joint_ids), dtype=float)
         self._filtered_target = None
+        self._standoff_direction_world = None
         self._hold_qpos = None
         self._last_saturated_joints = 0
         self._passive_actuator_overrides.clear()
+
+    def desired_position(
+        self, data: mujoco.MjData, target_position: np.ndarray
+    ) -> np.ndarray:
+        """Return the task goal while preserving a fixed tracking offset."""
+        target = np.asarray(target_position, dtype=float).reshape(3)
+        ee_position = frame_position(
+            self.model,
+            data,
+            self.ee_frame_type,
+            self.ee_frame_name,
+            self.ee_frame_offset,
+        )
+        if (
+            self.config.task.strip().lower() == "standoff"
+            and self._standoff_direction_world is None
+        ):
+            base = np.asarray(self.robot.base_position, dtype=float).reshape(3)
+            preferred = self.robot.preferred_standoff_direction
+            self._standoff_direction_world = normalize(
+                base - target
+                if preferred is None
+                else np.asarray(preferred, dtype=float).reshape(3),
+                ee_position - target,
+            )
+        return desired_ee_position(
+            self.config.task,
+            target,
+            ee_position,
+            self.config,
+            self.robot.base_position,
+            self._standoff_direction_world,
+        )
 
     def is_position_reachable(
         self,
@@ -359,13 +400,7 @@ class ResolvedRateController:
             self.ee_frame_name,
             self.ee_frame_offset,
         )
-        desired = desired_ee_position(
-            self.config.task,
-            self._filtered_target,
-            ee_pos,
-            self.config,
-            self.robot.base_position,
-        )
+        desired = self.desired_position(data, self._filtered_target)
         error = desired - ee_pos
         ee_velocity = (
             clamp_norm(

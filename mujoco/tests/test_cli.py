@@ -596,6 +596,7 @@ def test_robot_descriptor_schema_version_and_grasp_metadata(tmp_path: Path) -> N
             "gripper_closed_ctrl": [0.0],
             "torque_gain_scale": [0.5, 0.75],
             "impedance_gain_scale": [0.4, 0.6],
+            "preferred_standoff_direction": [0.0, 0.0, 2.0],
         }
     )
     path, _ = _write_robot_descriptor(
@@ -607,6 +608,7 @@ def test_robot_descriptor_schema_version_and_grasp_metadata(tmp_path: Path) -> N
     assert spec.gripper_actuator_names == ("gripper",)
     assert spec.torque_gain_scale == (0.5, 0.75)
     assert spec.impedance_gain_scale == (0.4, 0.6)
+    assert spec.preferred_standoff_direction == (0.0, 0.0, 1.0)
     descriptor["schema_version"] = 2
     path, _ = _write_robot_descriptor(tmp_path, descriptor)
     with pytest.raises(ValueError, match="unsupported"):

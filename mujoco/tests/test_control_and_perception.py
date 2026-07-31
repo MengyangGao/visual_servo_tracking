@@ -34,6 +34,14 @@ def test_task_goal_modes() -> None:
     assert np.allclose(desired_ee_position("pick-place", target, ee, cfg), target)
     standoff = desired_ee_position("standoff", target, ee, cfg)
     assert np.isclose(np.linalg.norm(standoff - target), 0.2)
+    fixed_standoff = desired_ee_position(
+        "standoff",
+        target,
+        ee,
+        cfg,
+        standoff_direction_world=np.array([0.0, -1.0, 0.0]),
+    )
+    assert np.allclose(fixed_standoff, target + np.array([0.0, -0.2, 0.0]))
     front = desired_ee_position("front-standoff", target, ee, cfg)
     assert np.isclose(np.linalg.norm((front - target)[:2]), 0.2)
     assert np.isclose(front[2], target[2])
@@ -102,11 +110,41 @@ def test_color_segmentation_detects_render_like_blob() -> None:
     assert detection.success
     assert detection.bbox_xyxy is not None
     assert detection.centroid_px is not None
-    assert detection.anchor_type == "surface_depth_point_cluster"
+    assert detection.anchor_type == "model_center_from_surface"
     assert detection.world_bbox_min is not None
     assert detection.world_bbox_max is not None
     assert 105 < detection.centroid_px[0] < 120
     assert 80 < detection.centroid_px[1] < 100
+
+
+def test_color_depth_surface_is_corrected_to_known_object_center() -> None:
+    target = TargetSpec(
+        "red-ball",
+        "sphere",
+        (0.10, 0.10, 0.10),
+        (0.95, 0.10, 0.10, 1.0),
+    )
+    image = np.zeros((120, 160, 3), dtype=np.uint8)
+    depth = np.full((120, 160), np.nan, dtype=np.float32)
+    bgr = tuple(int(v * 255) for v in target.rgba[2::-1])
+    cv2.circle(image, (80, 60), 16, bgr, -1)
+    cv2.circle(depth, (80, 60), 16, 1.0 - (2.0 / 3.0) * 0.05, -1)
+    observation = CameraObservation(
+        frame_bgr=image,
+        depth_m=depth,
+        intrinsics=CameraIntrinsics(120.0, 120.0, 80.0, 60.0, 160, 120),
+        camera_position=np.zeros(3),
+        camera_xmat=np.eye(3),
+        depth_metric=True,
+    )
+
+    detection = ColorSegmentationPerception().detect(
+        observation, np.zeros(3), target, "red ball"
+    )
+
+    assert detection.success
+    assert detection.anchor_type == "model_center_from_surface"
+    assert np.allclose(detection.target_position, [0.0, 0.0, -1.0], atol=0.004)
 
 
 def test_color_segmentation_handles_red_hue_wraparound() -> None:
@@ -737,3 +775,25 @@ def test_controller_uses_robot_spec_dimensions_for_lite6() -> None:
     )
     assert len(controller._joint_ids) == 6
     assert len(controller._actuator_ids) == 6
+
+
+def test_standoff_controller_latches_relative_tracking_offset() -> None:
+    scene = build_scene(resolve_target("cup"), robot="panda")
+    controller = ResolvedRateController(
+        scene.model,
+        scene.ee_frame_name,
+        scene.ee_frame_type,
+        scene.ee_frame_offset,
+        scene.robot,
+        ControllerConfig(standoff_m=0.10),
+    )
+    controller.reset(scene.data)
+    first_target = np.array([0.50, 0.05, 0.40])
+    first_goal = controller.desired_position(scene.data, first_target)
+    target_translation = np.array([0.06, -0.04, 0.02])
+    second_goal = controller.desired_position(
+        scene.data, first_target + target_translation
+    )
+
+    assert np.allclose(second_goal - first_goal, target_translation)
+    assert np.isclose(np.linalg.norm(first_goal - first_target), 0.10)

@@ -16,12 +16,11 @@ from .control import (
     ResolvedRateController,
     ServoState,
     desired_ee_orientation,
-    desired_ee_position,
 )
 from .core.types import FeatureObservation, ServoMode
 from .depth import DepthBackend, build_depth_backend
 from .manipulation import ContactGraspEvaluator, GraspEvidence
-from .math_utils import tool_z_facing_rotation, vector_alignment_error
+from .math_utils import clamp_norm, tool_z_facing_rotation, vector_alignment_error
 from .perception import (
     CameraIntrinsics,
     CameraObservation,
@@ -138,6 +137,9 @@ class RunSummary:
     target_lift_m: float = 0.0
     steady_state_rms_error_m: float = 0.0
     steady_state_p95_error_m: float = 0.0
+    target_path_length_m: float = 0.0
+    end_effector_path_length_m: float = 0.0
+    tracking_path_ratio: float = 1.0
     perception_device: str = "none"
     depth_device: str = "none"
     servo_mode: str = "pbvs"
@@ -238,6 +240,7 @@ class SimulationState:
 @dataclass(slots=True)
 class _StepOutcome:
     servo_state: ServoState
+    truth_target_position: np.ndarray
     error_m: float
     hold: bool
     oracle_truth: bool
@@ -375,6 +378,7 @@ class VisualServoSimulation:
         self._ever_tracked = self.detector_name == "oracle"
         self._last_observed_target: np.ndarray | None = None
         self._last_observed_time_s: float | None = None
+        self._estimated_target_velocity = np.zeros(3, dtype=float)
         self._reacquire_candidate: np.ndarray | None = None
         self._reacquire_count = 0
         self._reacquire_last_time_s: float | None = None
@@ -676,6 +680,7 @@ class VisualServoSimulation:
         self._ever_tracked = self.detector_name == "oracle"
         self._last_observed_target = None
         self._last_observed_time_s = None
+        self._estimated_target_velocity.fill(0.0)
         self._reacquire_candidate = None
         self._reacquire_count = 0
         self._reacquire_last_time_s = None
@@ -957,6 +962,8 @@ class VisualServoSimulation:
     def _run_loop(self, viewer) -> RunSummary:
         errors: list[float] = []
         error_times: list[float] = []
+        truth_target_positions: list[np.ndarray] = []
+        end_effector_positions: list[np.ndarray] = []
         hold_steps = 0
         oracle_truth_steps = 0
         truth_fallback_steps = 0
@@ -985,6 +992,8 @@ class VisualServoSimulation:
             last_state = outcome.servo_state
             errors.append(outcome.error_m)
             error_times.append(float(last_state.time_s) - sim_start)
+            truth_target_positions.append(outcome.truth_target_position.copy())
+            end_effector_positions.append(last_state.ee_position.copy())
             hold_steps += int(outcome.hold)
             oracle_truth_steps += int(outcome.oracle_truth)
             perception_updates += outcome.perception_updates
@@ -1043,12 +1052,8 @@ class VisualServoSimulation:
         }:
             final_desired = last_state.desired_position
         else:
-            final_desired = desired_ee_position(
-                self.config.controller.task,
-                final_snapshot.target_position,
-                final_snapshot.end_effector_position,
-                self.config.controller,
-                self.robot.base_position,
+            final_desired = self.controller.desired_position(
+                data, final_snapshot.target_position
             )
         final_error = float(
             np.linalg.norm(final_desired - final_snapshot.end_effector_position)
@@ -1058,6 +1063,15 @@ class VisualServoSimulation:
         metric_array = np.asarray(metric_errors, dtype=float)
         steady_start = len(metric_array) // 2
         steady_array = metric_array[steady_start:]
+        target_path_length = self._path_length(truth_target_positions[steady_start:])
+        end_effector_path_length = self._path_length(
+            end_effector_positions[steady_start:]
+        )
+        tracking_path_ratio = (
+            end_effector_path_length / target_path_length
+            if target_path_length > 1e-6
+            else 1.0
+        )
         settling_time = self._settling_time(errors, error_times)
         run_latencies = self._perception_latencies_s[latency_start:]
         detected_position = final_snapshot.detected_position
@@ -1139,6 +1153,9 @@ class VisualServoSimulation:
                 np.sqrt(np.mean(steady_array * steady_array))
             ),
             steady_state_p95_error_m=float(np.percentile(steady_array, 95.0)),
+            target_path_length_m=target_path_length,
+            end_effector_path_length_m=end_effector_path_length,
+            tracking_path_ratio=tracking_path_ratio,
             perception_device=self._perception_device_name(),
             depth_device=self._depth_device_name(),
             servo_mode=(
@@ -1266,7 +1283,7 @@ class VisualServoSimulation:
         elif (
             not hold_command or occlusion_bridge
         ) and self._last_observed_target is not None:
-            command_target = self._last_observed_target
+            command_target = self._predicted_observed_target(time_s)
             hold_command = False
         else:
             command_target = None
@@ -1282,19 +1299,7 @@ class VisualServoSimulation:
             )
         else:
             assert command_target is not None
-            desired_for_servo = desired_ee_position(
-                self.config.controller.task,
-                command_target,
-                frame_position(
-                    model,
-                    data,
-                    self.scene.ee_frame_type,
-                    self.scene.ee_frame_name,
-                    self.scene.ee_frame_offset,
-                ),
-                self.config.controller,
-                self.robot.base_position,
-            )
+            desired_for_servo = self.controller.desired_position(data, command_target)
             feature = self._latest_target_feature()
             objective = (
                 self.visual_objective.compute(
@@ -1339,7 +1344,9 @@ class VisualServoSimulation:
                 time_s,
                 step_index,
                 tick.duration_s,
-                cartesian_velocity_world=objective.linear_velocity_world,
+                cartesian_velocity_world=self._tracking_velocity_command(
+                    objective.linear_velocity_world
+                ),
                 desired_rotation_world=self._control_orientation(
                     command_target,
                     frame_position(
@@ -1357,13 +1364,7 @@ class VisualServoSimulation:
         eval_desired = (
             manipulation_goal
             if manipulation_goal is not None
-            else desired_ee_position(
-                self.config.controller.task,
-                target_pos,
-                servo_state.ee_position,
-                self.config.controller,
-                self.robot.base_position,
-            )
+            else self.controller.desired_position(data, target_pos)
         )
         error_m = float(np.linalg.norm(eval_desired - servo_state.ee_position))
 
@@ -1378,12 +1379,20 @@ class VisualServoSimulation:
             mujoco.mj_step(model, data)
         return _StepOutcome(
             servo_state=servo_state,
+            truth_target_position=target_pos.copy(),
             error_m=error_m,
             hold=hold_command,
             oracle_truth=oracle_truth,
             perception_updates=perception_updates,
             rejected_detections=rejected_detections,
         )
+
+    @staticmethod
+    def _path_length(positions: list[np.ndarray]) -> float:
+        if len(positions) < 2:
+            return 0.0
+        points = np.asarray(positions, dtype=float)
+        return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
 
     def _latest_target_feature(self) -> FeatureObservation | None:
         detection = self._last_accepted_detection
@@ -1955,6 +1964,18 @@ class VisualServoSimulation:
         capture_sim_time: float,
         capture_wall_time: float | None,
     ) -> None:
+        if (
+            self._last_observed_target is not None
+            and self._last_observed_time_s is not None
+        ):
+            dt = capture_sim_time - self._last_observed_time_s
+            if dt > 1e-4:
+                measured_velocity = clamp_norm(
+                    (position - self._last_observed_target) / dt, 0.35
+                )
+                self._estimated_target_velocity = (
+                    0.65 * self._estimated_target_velocity + 0.35 * measured_velocity
+                )
         self._last_observed_target = position.copy()
         self._last_observed_time_s = capture_sim_time
         self._last_accepted_detection_position = position.copy()
@@ -1966,6 +1987,30 @@ class VisualServoSimulation:
         )
         self._last_accepted_detection_wall_time = (
             capture_wall_time or time.perf_counter()
+        )
+
+    def _predicted_observed_target(self, time_s: float) -> np.ndarray:
+        assert self._last_observed_target is not None
+        if (
+            self.config.controller.task.strip().lower() != "standoff"
+            or self._last_observed_time_s is None
+        ):
+            return self._last_observed_target.copy()
+        prediction_horizon = float(
+            np.clip(time_s - self._last_observed_time_s, 0.0, 0.10)
+        )
+        return (
+            self._last_observed_target
+            + self._estimated_target_velocity * prediction_horizon
+        )
+
+    def _tracking_velocity_command(self, feedback_velocity: np.ndarray) -> np.ndarray:
+        velocity = np.asarray(feedback_velocity, dtype=float).reshape(3)
+        if self.config.controller.task.strip().lower() != "standoff":
+            return velocity
+        return clamp_norm(
+            velocity + self._estimated_target_velocity,
+            float(self.config.controller.max_ee_speed),
         )
 
     def _enter_tracking(

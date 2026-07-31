@@ -120,6 +120,7 @@ def _estimate_world_anchor(
     observation: CameraObservation,
     bbox_xyxy: np.ndarray,
     mask: np.ndarray | None,
+    target: TargetSpec | None = None,
 ) -> _WorldAnchorEstimate:
     _validate_observation(observation)
     bbox = _valid_bbox(bbox_xyxy)
@@ -169,15 +170,74 @@ def _estimate_world_anchor(
     estimate = robust_point_estimate(
         world_points, support_mask, int(np.count_nonzero(mask))
     )
+    position = estimate.position
+    anchor_type = "surface_depth_point_cluster"
+    if target is not None and position is not None:
+        center = _model_center_from_visible_surface(
+            observation, estimate.support_mask, target
+        )
+        if center is not None:
+            position = center
+            anchor_type = "model_center_from_surface"
     return _WorldAnchorEstimate(
-        estimate.position,
+        position,
         estimate.support_mask,
         estimate.world_bbox_min,
         estimate.world_bbox_max,
-        "surface_depth_point_cluster",
+        anchor_type,
         covariance=estimate.covariance,
         valid_fraction=estimate.valid_fraction,
         quality=estimate.quality,
+    )
+
+
+def _model_center_from_visible_surface(
+    observation: CameraObservation, mask: np.ndarray, target: TargetSpec
+) -> np.ndarray | None:
+    """Lift the visible RGB-D surface centroid to the known object center.
+
+    The image-area centroid of a visible ellipsoid lies about two thirds of
+    its view-direction radius in front of its center.  This correction uses
+    only the registered target dimensions, mask, depth, and camera pose.
+    """
+    centroid = _mask_centroid(mask)
+    if centroid is None:
+        return None
+    valid = (mask > 0) & np.isfinite(observation.depth_m)
+    valid &= observation.depth_m > 0.0
+    if not np.any(valid):
+        return None
+    surface_depth = float(np.median(observation.depth_m[valid]))
+    surface = _pixel_depth_to_world(
+        observation, float(centroid[0]), float(centroid[1]), surface_depth
+    )
+    camera_position = np.asarray(observation.camera_position, dtype=float).reshape(3)
+    camera_ray = surface - camera_position
+    ray_norm = float(np.linalg.norm(camera_ray))
+    if ray_norm <= 1e-9:
+        return None
+    camera_ray /= ray_norm
+
+    rotation = _quat_wxyz_to_rotation(np.asarray(target.quat, dtype=float))
+    local_ray = rotation.T @ camera_ray
+    half_extents = np.maximum(0.5 * np.asarray(target.size, dtype=float), 1e-4)
+    view_radius = 1.0 / float(np.sqrt(np.sum((local_ray / half_extents) ** 2)))
+    return surface + camera_ray * ((2.0 / 3.0) * view_radius)
+
+
+def _quat_wxyz_to_rotation(quaternion: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quaternion, dtype=float).reshape(4)
+    norm = float(np.linalg.norm(quat))
+    if norm <= 1e-12:
+        return np.eye(3)
+    w, x, y, z = quat / norm
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=float,
     )
 
 
@@ -364,7 +424,7 @@ class ColorSegmentationPerception:
             if abs(moments["m00"]) < 1e-9
             else moments["m01"] / moments["m00"]
         )
-        anchor = _estimate_world_anchor(observation, bbox, selected_mask)
+        anchor = _estimate_world_anchor(observation, bbox, selected_mask, target)
         position = anchor.position
         selected_mask = anchor.mask
         self._last_bbox = bbox.copy()
@@ -707,6 +767,7 @@ class SemanticPerception:
         if observation is None:
             return Detection(False, self.name, None)
         _validate_observation(observation)
+        self._current_target = target
         if self._initialized:
             self._frames_since_redetect = getattr(self, "_frames_since_redetect", 0) + 1
             redetect_interval = max(1, int(getattr(self, "_redetect_interval", 45)))
@@ -765,7 +826,7 @@ class SemanticPerception:
         bbox = boxes[best].detach().cpu().numpy().astype(float)
         score = float(scores[best].detach().cpu().item())
         mask = self._sam_mask(image, bbox)
-        anchor = _estimate_world_anchor(observation, bbox, mask)
+        anchor = _estimate_world_anchor(observation, bbox, mask, target)
         position = anchor.position
         mask = anchor.mask
         x1, y1, x2, y2 = bbox
@@ -921,7 +982,12 @@ class SemanticPerception:
             )
         x, y, w, h = cv2.boundingRect(contour)
         bbox = np.array([x, y, x + w, y + h], dtype=float)
-        anchor = _estimate_world_anchor(observation, bbox, selected_mask)
+        anchor = _estimate_world_anchor(
+            observation,
+            bbox,
+            selected_mask,
+            getattr(self, "_current_target", None),
+        )
         position = anchor.position
         selected_mask = anchor.mask
         moments = cv2.moments(contour)
