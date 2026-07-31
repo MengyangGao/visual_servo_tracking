@@ -435,9 +435,7 @@ class VisualServoSimulation:
         )
         workspace_min = np.asarray(bounds[0], dtype=float).copy()
         workspace_max = np.asarray(bounds[1], dtype=float).copy()
-        workspace_min[2] = max(
-            workspace_min[2], self.scene.support_z + 0.005
-        )
+        workspace_min[2] = max(workspace_min[2], self.scene.support_z + 0.005)
         self._path_validator = CartesianPathValidator(
             workspace_min,
             workspace_max,
@@ -464,7 +462,7 @@ class VisualServoSimulation:
                 SafetyLimits(
                     workspace_min=tuple(float(value) for value in workspace_min),
                     workspace_max=tuple(float(value) for value in workspace_max),
-                    max_normal_force_n=config.controller.policy_max_normal_force_n
+                    max_normal_force_n=config.controller.policy_max_normal_force_n,
                 ),
                 path_is_valid=self._cartesian_path_is_valid,
             )
@@ -1130,12 +1128,8 @@ class VisualServoSimulation:
             final_image_error_px=(
                 0.0 if last_state is None else last_state.image_error_px
             ),
-            grasp_normal_force_n=(
-                self._peak_grasp_normal_force_n
-            ),
-            grasp_relative_slip_m=(
-                self._max_grasp_relative_slip_m
-            ),
+            grasp_normal_force_n=(self._peak_grasp_normal_force_n),
+            grasp_relative_slip_m=(self._max_grasp_relative_slip_m),
             policy_name=(
                 "reactive-pick-place" if self._pick_place_policy is not None else "none"
             ),
@@ -1519,10 +1513,7 @@ class VisualServoSimulation:
             self._grasp_lost_frames = (
                 0 if contact_stable else self._grasp_lost_frames + 1
             )
-            if (
-                self._grasp_lost_frames
-                >= self.config.controller.grasp_lost_frames
-            ):
+            if self._grasp_lost_frames >= self.config.controller.grasp_lost_frames:
                 self._grasped = False
                 self._manipulation_state = ManipulationState.FAILED
                 return ee.copy(), ee.copy()
@@ -1578,10 +1569,7 @@ class VisualServoSimulation:
                     self._grasp_lost_frames = 0
                 else:
                     self._grasp_lost_frames += 1
-                if (
-                    self._grasp_lost_frames
-                    >= self.config.controller.grasp_lost_frames
-                ):
+                if self._grasp_lost_frames >= self.config.controller.grasp_lost_frames:
                     self._grasped = False
 
         if policy.selected_grasp is None:
@@ -1731,9 +1719,7 @@ class VisualServoSimulation:
         self._grasp_pose_quality = 0.0
         return self._last_target_rotation.copy()
 
-    def _cartesian_path_is_valid(
-        self, start: np.ndarray, end: np.ndarray
-    ) -> bool:
+    def _cartesian_path_is_valid(self, start: np.ndarray, end: np.ndarray) -> bool:
         return self._path_validator.check(start, end).valid
 
     @staticmethod
@@ -1772,18 +1758,14 @@ class VisualServoSimulation:
             if not self.controller.is_position_reachable(
                 self.scene.data,
                 place,
-                tolerance_m=max(
-                    self.config.controller.grasp_stage_tolerance_m, 0.035
-                ),
+                tolerance_m=max(self.config.controller.grasp_stage_tolerance_m, 0.035),
             ):
                 raise ValueError("place_position is not reachable by numerical IK")
             return place
         place = self._target_base_position.copy()
         if self._work_surface is not None:
             center = np.asarray(self._work_surface.center_xy, dtype=float)
-            available = np.asarray(
-                self._work_surface.half_size_xy, dtype=float
-            ) - inset
+            available = np.asarray(self._work_surface.half_size_xy, dtype=float) - inset
             axis = int(np.argmax(available))
             direction = -1.0 if place[axis] >= center[axis] else 1.0
             place[axis] += direction * min(0.10, max(0.04, 0.75 * available[axis]))

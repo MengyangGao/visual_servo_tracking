@@ -45,10 +45,7 @@ class ContactGraspEvaluator:
         self.confirmation_frames = int(confirmation_frames)
         if not np.isfinite(self.min_normal_force_n) or self.min_normal_force_n <= 0.0:
             raise ValueError("min_normal_force_n must be positive and finite")
-        if (
-            not np.isfinite(self.max_relative_slip_m)
-            or self.max_relative_slip_m <= 0.0
-        ):
+        if not np.isfinite(self.max_relative_slip_m) or self.max_relative_slip_m <= 0.0:
             raise ValueError("max_relative_slip_m must be positive and finite")
         if self.confirmation_frames < 1:
             raise ValueError("confirmation_frames must be at least one")

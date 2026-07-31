@@ -217,9 +217,7 @@ def test_cartesian_path_and_work_surface_enforce_geometry() -> None:
         np.array([1.0, 0.5, 1.0]),
         support_z=0.215,
     )
-    assert validator.check(
-        np.array([0.4, 0.0, 0.4]), np.array([0.5, 0.0, 0.25])
-    ).valid
+    assert validator.check(np.array([0.4, 0.0, 0.4]), np.array([0.5, 0.0, 0.25])).valid
     assert not validator.check(
         np.array([0.4, 0.0, 0.4]), np.array([0.5, 0.0, 0.21])
     ).valid

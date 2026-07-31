@@ -79,9 +79,9 @@ def test_six_d_pose_uses_segmented_metric_depth() -> None:
 
 def test_six_d_pose_axis_ambiguity_is_aligned_to_prior() -> None:
     reference = np.eye(3)
-    ambiguous = np.array(
-        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
-    )[:, [1, 0, 2]]
+    ambiguous = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])[
+        :, [1, 0, 2]
+    ]
     ambiguous[:, 2] *= -1.0
     aligned = align_rotation_to_reference(ambiguous, reference)
     assert np.allclose(aligned.T @ aligned, np.eye(3), atol=1e-9)

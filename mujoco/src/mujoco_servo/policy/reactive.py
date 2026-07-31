@@ -317,7 +317,10 @@ class ReactivePickPlacePolicy:
                     hold=True,
                     reason="placement visually verified",
                 )
-            if now - self._phase_enter_time_s > self.config.place_verification_timeout_s:
+            if (
+                now - self._phase_enter_time_s
+                > self.config.place_verification_timeout_s
+            ):
                 self.failure_reason = "visual placement verification timed out"
                 self._transition(PolicyPhase.FAILED, now)
                 return PolicyCommand(

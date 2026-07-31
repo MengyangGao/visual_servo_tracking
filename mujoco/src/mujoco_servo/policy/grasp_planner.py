@@ -83,7 +83,9 @@ class GraspPlanner:
                     context.max_gripper_width_m is not None
                     and width > context.max_gripper_width_m + 1e-9
                 ):
-                    rejections.append(GraspRejection(name, "wider than gripper aperture"))
+                    rejections.append(
+                        GraspRejection(name, "wider than gripper aperture")
+                    )
                     continue
 
             pregrasp = position - approach * float(context.approach_distance_m)
@@ -92,7 +94,9 @@ class GraspPlanner:
                 rejections.append(GraspRejection(name, "outside coarse reach radius"))
                 continue
             if min(position[2], pregrasp[2]) < context.support_z + 0.005:
-                rejections.append(GraspRejection(name, "insufficient surface clearance"))
+                rejections.append(
+                    GraspRejection(name, "insufficient surface clearance")
+                )
                 continue
             if context.reachable is not None and not (
                 context.reachable(pregrasp) and context.reachable(position)

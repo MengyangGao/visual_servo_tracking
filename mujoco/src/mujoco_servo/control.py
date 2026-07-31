@@ -205,21 +205,19 @@ class ResolvedRateController:
             if self.ee_frame_type == "site":
                 mujoco.mj_jacSite(self.model, scratch, jacp, jacr, self._frame_id)
             elif self.ee_frame_type == "body_point":
-                mujoco.mj_jac(
-                    self.model, scratch, jacp, jacr, position, self._frame_id
-                )
+                mujoco.mj_jac(self.model, scratch, jacp, jacr, position, self._frame_id)
             else:
                 mujoco.mj_jacBody(self.model, scratch, jacp, jacr, self._frame_id)
             joint_jacobian = jacp[:, self._dof_adr]
-            step = damped_pseudo_inverse(joint_jacobian, 0.04) @ clamp_norm(
-                error, 0.08
-            )
+            step = damped_pseudo_inverse(joint_jacobian, 0.04) @ clamp_norm(error, 0.08)
             step = np.clip(step, -0.18, 0.18)
             scratch.qpos[self._qpos_adr] += step
             for index, joint_id in enumerate(self._joint_ids):
                 if self.model.jnt_limited[joint_id]:
                     low, high = self.model.jnt_range[joint_id]
-                    margin = min(float(self.config.joint_limit_margin), 0.2 * (high - low))
+                    margin = min(
+                        float(self.config.joint_limit_margin), 0.2 * (high - low)
+                    )
                     scratch.qpos[self._qpos_adr[index]] = np.clip(
                         scratch.qpos[self._qpos_adr[index]], low + margin, high - margin
                     )

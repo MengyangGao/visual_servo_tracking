@@ -560,9 +560,7 @@ def _validate_config_fields(config: DemoConfig) -> None:
         raise ValueError(f"detector must be one of {', '.join(available_detectors())}")
 
     _validate_integer(config.steps, "steps", minimum=0)
-    _validate_integer(
-        config.terminal_settle_steps, "terminal_settle_steps", minimum=0
-    )
+    _validate_integer(config.terminal_settle_steps, "terminal_settle_steps", minimum=0)
     _validate_integer(config.seed, "seed", minimum=0)
     camera_fps = _finite_number(config.camera_fps, "camera_fps")
     if camera_fps <= 0.0:
