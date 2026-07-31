@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
-from ._bootstrap import SRC  # noqa: F401
-
-from mujoco_servo.cli import build_parser, config_from_args
 from mujoco_servo import cli as cli_module
+from mujoco_servo.cli import build_parser, config_from_args
 from mujoco_servo.config import (
     CameraConfig,
     ControllerConfig,
@@ -23,10 +21,12 @@ from mujoco_servo.config import (
     TargetPart,
     TargetSpec,
     load_robot_specs,
-    resolve_robot,
     resolve_config,
+    resolve_robot,
     validate_config,
 )
+
+SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def _write_robot_descriptor(

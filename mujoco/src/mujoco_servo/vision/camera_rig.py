@@ -64,7 +64,7 @@ class CameraRig:
             )
         return observations
 
-    def __enter__(self) -> "CameraRig":
+    def __enter__(self) -> CameraRig:
         return self
 
     def __exit__(self, *_args) -> None:

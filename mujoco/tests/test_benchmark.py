@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from ._bootstrap import SRC  # noqa: F401
-
 from mujoco_servo.benchmark import build_parser, run_matrix
 from mujoco_servo.config import available_actuator_modes, available_robots
 

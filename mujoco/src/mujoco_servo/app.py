@@ -10,18 +10,18 @@ import cv2
 import mujoco
 import numpy as np
 
-from .config import CameraConfig, DemoConfig, resolve_config
-from .core.types import FeatureObservation, ServoMode
 from .clock import ControlTick, PhaseAccumulatorClock
+from .config import CameraConfig, DemoConfig, resolve_config
 from .control import (
     ResolvedRateController,
     ServoState,
     desired_ee_orientation,
     desired_ee_position,
 )
+from .core.types import FeatureObservation, ServoMode
 from .depth import DepthBackend, build_depth_backend
-from .math_utils import tool_z_facing_rotation, vector_alignment_error
 from .manipulation import ContactGraspEvaluator, GraspEvidence
+from .math_utils import tool_z_facing_rotation, vector_alignment_error
 from .perception import (
     CameraIntrinsics,
     CameraObservation,
@@ -44,19 +44,23 @@ from .policy import (
 )
 from .scene import (
     WorldGraspPoint,
-    activate_grasp as activate_scene_grasp,
     body_position,
     build_scene,
-    deactivate_grasp as deactivate_scene_grasp,
     frame_position,
     grasp_point_world,
     set_target_position,
     site_position,
 )
+from .scene import (
+    activate_grasp as activate_scene_grasp,
+)
+from .scene import (
+    deactivate_grasp as deactivate_scene_grasp,
+)
 from .servo import VisualServoObjective
 from .targets import TargetMotion, base_position
-from .viz import DashboardRenderer, DashboardTelemetry, VideoRecorder
 from .vision import align_rotation_to_reference, estimate_pose_6d
+from .viz import DashboardRenderer, DashboardTelemetry, VideoRecorder
 
 
 class TrackingState(str, Enum):
@@ -734,7 +738,7 @@ class VisualServoSimulation:
             self._recorder.close()
             self._recorder = None
 
-    def __enter__(self) -> "VisualServoSimulation":
+    def __enter__(self) -> VisualServoSimulation:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
@@ -1160,9 +1164,11 @@ class VisualServoSimulation:
                     self._manipulation_state is ManipulationState.COMPLETE
                     and (
                         self.config.controller.task.strip().lower() != "pick-place"
-                        or final_snapshot.place_error_m is not None
-                        and final_snapshot.place_error_m
-                        <= self.config.controller.policy_place_tolerance_m
+                        or (
+                            final_snapshot.place_error_m is not None
+                            and final_snapshot.place_error_m
+                            <= self.config.controller.policy_place_tolerance_m
+                        )
                     )
                 )
                 if self.config.controller.task.strip().lower()
@@ -2665,8 +2671,8 @@ class VisualServoSimulation:
         if not np.isfinite(point).all():
             return None
         h, w = image_shape[:2]
-        x = max(0, min(w - 1, int(round(point[0]))))
-        y = max(0, min(h - 1, int(round(point[1]))))
+        x = max(0, min(w - 1, round(point[0])))
+        y = max(0, min(h - 1, round(point[1])))
         return x, y
 
     def _update_viewer_overlay(self, viewer) -> None:

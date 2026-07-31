@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 from .app import VisualServoSimulation
 from .config import (
@@ -15,7 +15,6 @@ from .config import (
     available_tasks,
     available_trajectories,
 )
-
 
 DEFAULT_TARGETS = {"panda": "cup", "ur5e": "box", "lite6": "box"}
 

@@ -26,7 +26,7 @@ test = [
 dev = [
   "build>=1.2",
   "coverage[toml]>=7.6",
-  "ruff>=0.9",
+  "ruff==0.16.1",
 ]
 
 [project.scripts]
@@ -41,9 +41,13 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 extend-exclude = ["vendor"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF"]
 
 [tool.ruff.format]
 quote-style = "double"

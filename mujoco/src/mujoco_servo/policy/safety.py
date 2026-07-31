@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Callable
 
 import numpy as np
 
@@ -21,9 +21,10 @@ class SafetySupervisor:
 
     def __init__(
         self,
-        limits: SafetyLimits = SafetyLimits(),
+        limits: SafetyLimits | None = None,
         path_is_valid: Callable[[np.ndarray, np.ndarray], bool] | None = None,
     ) -> None:
+        limits = SafetyLimits() if limits is None else limits
         self.limits = limits
         self._minimum = np.asarray(limits.workspace_min, dtype=float).reshape(3)
         self._maximum = np.asarray(limits.workspace_max, dtype=float).reshape(3)

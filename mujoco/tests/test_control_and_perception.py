@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import cv2
 import numpy as np
 import pytest
-from types import SimpleNamespace
-
-from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo.config import ControllerConfig, TargetSpec
 from mujoco_servo.control import ResolvedRateController, desired_ee_position
@@ -235,7 +234,7 @@ def test_depth_anchor_rejects_mask_depth_outliers() -> None:
         camera_xmat=np.eye(3, dtype=float),
         depth_metric=True,
     )
-    position, _, bbox_min, bbox_max, anchor_type = _estimate_world_position(
+    position, _, _, bbox_max, anchor_type = _estimate_world_position(
         observation, np.array([40, 40, 60, 60], dtype=float), mask
     )
     assert anchor_type == "surface_depth_point_cluster"

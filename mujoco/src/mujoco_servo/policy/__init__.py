@@ -1,12 +1,12 @@
 """Task-level grasp planning, reactive execution and safety supervision."""
 
+from .geometry import CartesianPathCheck, CartesianPathValidator, WorkSurface
 from .grasp_planner import (
     GraspCandidate,
     GraspPlanner,
     GraspPlanningContext,
     GraspRejection,
 )
-from .geometry import CartesianPathCheck, CartesianPathValidator, WorkSurface
 from .reactive import (
     GripperCommand,
     PolicyCommand,
@@ -18,13 +18,12 @@ from .reactive import (
 from .safety import SafetyLimits, SafetySupervisor
 
 __all__ = [
+    "CartesianPathCheck",
+    "CartesianPathValidator",
     "GraspCandidate",
     "GraspPlanner",
     "GraspPlanningContext",
     "GraspRejection",
-    "CartesianPathCheck",
-    "CartesianPathValidator",
-    "WorkSurface",
     "GripperCommand",
     "PolicyCommand",
     "PolicyObservation",
@@ -33,4 +32,5 @@ __all__ = [
     "ReactivePolicyConfig",
     "SafetyLimits",
     "SafetySupervisor",
+    "WorkSurface",
 ]

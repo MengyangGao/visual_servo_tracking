@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from textwrap import dedent
-import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
@@ -503,7 +503,9 @@ def _name_declared_unnamed_actuators(root: ET.Element, robot: RobotSpec) -> None
     existing_names = {
         element.get("name") for element in actuators if element.get("name")
     }
-    for joint_name, actuator_name in zip(robot.joint_names, robot.actuator_names):
+    for joint_name, actuator_name in zip(
+        robot.joint_names, robot.actuator_names, strict=True
+    ):
         if actuator_name in existing_names:
             continue
         candidates = [
@@ -538,7 +540,9 @@ def _rewrite_controlled_actuators(
         for element in actuator_section
         if element.get("name")
     }
-    for actuator_name, joint_name in zip(robot.actuator_names, robot.joint_names):
+    for actuator_name, joint_name in zip(
+        robot.actuator_names, robot.joint_names, strict=True
+    ):
         element = by_name.get(actuator_name)
         if element is None:
             raise RuntimeError(
@@ -981,7 +985,9 @@ def _write_gripper_controls(scene: Scene, *, closed: bool) -> None:
     values = (
         scene.robot.gripper_closed_ctrl if closed else scene.robot.gripper_open_ctrl
     )
-    for actuator_name, value in zip(scene.robot.gripper_actuator_names, values):
+    for actuator_name, value in zip(
+        scene.robot.gripper_actuator_names, values, strict=True
+    ):
         actuator_id = resolve_passive_actuator(
             scene.model, scene.robot, actuator_name, value
         )

@@ -2,22 +2,19 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._bootstrap import SRC  # noqa: F401
-
-from mujoco_servo.config import ROBOT_SPECS, CameraConfig, ControllerConfig
+from mujoco_servo.app import VisualServoSimulation
+from mujoco_servo.config import ROBOT_SPECS, CameraConfig, ControllerConfig, DemoConfig
 from mujoco_servo.core import FeatureObservation, ServoMode
-from mujoco_servo.perception import CameraIntrinsics, CameraObservation
-from mujoco_servo.scene import build_scene
-from mujoco_servo.servo import VisualServoObjective
-from mujoco_servo.targets import TARGETS
 from mujoco_servo.humanoid import (
     BimanualGoals,
     BimanualSafetyConfig,
     G1BimanualController,
     symmetric_handover_goals,
 )
-from mujoco_servo.app import VisualServoSimulation
-from mujoco_servo.config import DemoConfig
+from mujoco_servo.perception import CameraIntrinsics, CameraObservation
+from mujoco_servo.scene import build_scene
+from mujoco_servo.servo import VisualServoObjective
+from mujoco_servo.targets import TARGETS
 from mujoco_servo.vision import (
     LabeledMeasurement,
     MultiTargetTracker,

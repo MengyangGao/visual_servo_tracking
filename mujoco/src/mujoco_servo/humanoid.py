@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 import mujoco
 import numpy as np
 
-from .config import ControllerConfig, ROBOT_SPECS
+from .config import ROBOT_SPECS, ControllerConfig
 from .control import ResolvedRateController, ServoState
 
 
@@ -64,9 +64,11 @@ class G1BimanualController:
     def __init__(
         self,
         model: mujoco.MjModel,
-        config: ControllerConfig = ControllerConfig(task="contact"),
-        safety: BimanualSafetyConfig = BimanualSafetyConfig(),
+        config: ControllerConfig | None = None,
+        safety: BimanualSafetyConfig | None = None,
     ) -> None:
+        config = ControllerConfig(task="contact") if config is None else config
+        safety = BimanualSafetyConfig() if safety is None else safety
         arm_config = replace(config, task="contact")
         left = ROBOT_SPECS["g1-left-arm"]
         right = ROBOT_SPECS["g1-right-arm"]

@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
-from numbers import Real
-from pathlib import Path
 import re
 import struct
+from dataclasses import dataclass
+from numbers import Real
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .config import GraspPoint, TargetPart, TargetSpec
-
 
 TARGETS: dict[str, TargetSpec] = {
     "grasp-cube": TargetSpec(

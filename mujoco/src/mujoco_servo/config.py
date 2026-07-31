@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 
 ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_MENAGERIE_HOME = ROOT / "vendor" / "mujoco_menagerie"
@@ -56,7 +55,7 @@ class TargetSpec:
     size: tuple[float, float, float]
     rgba: tuple[float, float, float, float]
     aliases: tuple[str, ...] = ()
-    parts: tuple["TargetPart", ...] = ()
+    parts: tuple[TargetPart, ...] = ()
     base_position: tuple[float, float, float] | None = None
     mesh_path: Path | None = None
     mesh_scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
@@ -1233,7 +1232,7 @@ def _parse_detection_bounds(
         )
     lower = _json_number_vector(lower_value, 3, f"{field_name}.min")
     upper = _json_number_vector(upper_value, 3, f"{field_name}.max")
-    if any(lo >= hi for lo, hi in zip(lower, upper)):
+    if any(lo >= hi for lo, hi in zip(lower, upper, strict=True)):
         raise ValueError(
             f"{field_name} min values must be strictly less than max values"
         )

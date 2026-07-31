@@ -34,7 +34,7 @@ class VideoRecorder:
             self._writer.release()
             self._writer = None
 
-    def __enter__(self) -> "VideoRecorder":
+    def __enter__(self) -> VideoRecorder:
         return self
 
     def __exit__(self, *_args) -> None:

@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import json
+from dataclasses import replace
 
 import cv2
-import numpy as np
 import mujoco
+import numpy as np
 import pytest
 
-from ._bootstrap import SRC  # noqa: F401
-
-from mujoco_servo.config import CameraConfig, EnvironmentSpec, RobotSpec
 from mujoco_servo.app import VisualServoSimulation
-from mujoco_servo.config import DemoConfig
+from mujoco_servo.config import CameraConfig, DemoConfig, EnvironmentSpec, RobotSpec
 from mujoco_servo.scene import (
     activate_grasp,
     build_scene,
@@ -162,7 +159,7 @@ def test_scene_uses_robot_default_target_position_and_supports_no_keyframe(
 
 def test_scene_rejects_robot_mjcf_include_with_clear_error(tmp_path) -> None:
     robot = _write_minimal_robot(tmp_path, include=True)
-    with pytest.raises(RuntimeError, match="uses <include>.*self-contained"):
+    with pytest.raises(RuntimeError, match=r"uses <include>.*self-contained"):
         build_scene(resolve_target("box"), robot=robot)
 
 
@@ -243,7 +240,7 @@ def test_scene_rejects_non_joint_actuator_transmission_with_colliding_id(
 
 def test_scene_rejects_home_position_outside_joint_range(tmp_path) -> None:
     robot = replace(_write_minimal_robot(tmp_path), home_qpos=(10.0,))
-    with pytest.raises(RuntimeError, match="home_qpos.*must be within"):
+    with pytest.raises(RuntimeError, match=r"home_qpos.*must be within"):
         build_scene(resolve_target("box"), robot=robot)
 
 
@@ -254,7 +251,7 @@ def test_scene_rejects_home_position_outside_actuator_control_range(tmp_path) ->
         'joint="minimal_joint" kp="100" ctrlrange="-0.1 0.1"',
     )
     robot.xml_path.write_text(text)
-    with pytest.raises(RuntimeError, match="maps to control.*outside actuator"):
+    with pytest.raises(RuntimeError, match=r"maps to control.*outside actuator"):
         build_scene(resolve_target("box"), robot=robot)
 
 
@@ -269,7 +266,7 @@ def test_scene_rejects_passive_actuator_constant_outside_control_range(
     robot.xml_path.write_text(text)
     robot = replace(robot, passive_actuator_ctrl=(("passive_actuator", 2.0),))
     with pytest.raises(
-        RuntimeError, match="passive actuator 'passive_actuator'.*outside range"
+        RuntimeError, match=r"passive actuator 'passive_actuator'.*outside range"
     ):
         build_scene(resolve_target("box"), robot=robot)
 
@@ -384,7 +381,7 @@ def test_target_file_normalizes_quaternion_and_rejects_zero(tmp_path) -> None:
     assert np.allclose(target.parts[0].quat, [1.0, 0.0, 0.0, 0.0])
     payload["targets"][0]["parts"][0]["quat"] = [0.0, 0.0, 0.0, 0.0]
     target_file.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="quaternion|quat.*non-zero"):
+    with pytest.raises(ValueError, match=r"quaternion|quat.*non-zero"):
         load_target_specs(target_file)
 
 
@@ -418,7 +415,7 @@ def test_target_file_rejects_inconsistent_round_geometry_sizes(
     target_file.write_text(
         json.dumps([{"name": "bad-round", "shape": shape, "size": size}])
     )
-    with pytest.raises(ValueError, match="equal|diameter|height"):
+    with pytest.raises(ValueError, match=r"equal|diameter|height"):
         load_target_specs(target_file)
 
 
@@ -614,7 +611,7 @@ def test_target_file_rejects_invalid_mesh_scale_and_missing_file(tmp_path) -> No
         "size": [0.1, 0.1, 0.1],
     }
     target_file.write_text(json.dumps({"targets": [target]}))
-    with pytest.raises(ValueError, match="scale.*positive"):
+    with pytest.raises(ValueError, match=r"scale.*positive"):
         load_target_specs(target_file)
     target["mesh_file"] = "missing.obj"
     target["scale"] = [1.0, 1.0, 1.0]

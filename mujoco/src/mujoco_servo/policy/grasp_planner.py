@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Callable, Iterable
 
 import numpy as np
 
@@ -71,8 +71,8 @@ class GraspPlanner:
             if name in context.excluded_names:
                 rejections.append(GraspRejection(name, "failed in an earlier attempt"))
                 continue
-            position = _vector3(getattr(point, "position"), "grasp position")
-            approach = _unit_vector(getattr(point, "approach"), "grasp approach")
+            position = _vector3(point.position, "grasp position")
+            approach = _unit_vector(point.approach, "grasp approach")
             width = getattr(point, "width_m", None)
             if width is not None:
                 width = float(width)

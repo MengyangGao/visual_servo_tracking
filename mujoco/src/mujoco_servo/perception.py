@@ -242,7 +242,7 @@ def _target_color_mask(
         if target_val < 50:
             value = frame_hsv[:, :, 2]
             saturation = frame_hsv[:, :, 1]
-            value_low = max(3, int(round(0.25 * target_val)))
+            value_low = max(3, round(0.25 * target_val))
             value_high = min(255, max(target_val + 24, 2 * target_val))
             dark_band = (value >= value_low) & (value <= value_high)
             if target_sat < 55:
@@ -256,7 +256,7 @@ def _target_color_mask(
         return selected.astype(np.uint8) * 255
     hue = int(target_hsv[0])
     min_sat = max(35, target_sat - 150)
-    min_val = max(20, int(round(0.22 * target_val)))
+    min_val = max(20, round(0.22 * target_val))
     return _hue_range_mask(
         frame_hsv, hue, tolerance=12, min_sat=min_sat, min_val=min_val
     )
@@ -1025,7 +1025,7 @@ class SemanticPerception:
             if bbox is None
             else float(np.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]))
         )
-        radius = max(3, min(13, int(round(0.16 * diagonal))))
+        radius = max(3, min(13, round(0.16 * diagonal)))
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
         )
@@ -1088,7 +1088,7 @@ class SemanticPerception:
             val_delta = np.abs(roi_hsv[:, :, 2].astype(np.int16) - val)
             roi = (
                 (sat_delta <= max(30, 90 - sat))
-                & (val_delta <= max(10, int(round(0.30 * max(val, 20)))))
+                & (val_delta <= max(10, round(0.30 * max(val, 20))))
             ).astype(np.uint8) * 255
         else:
             roi = _hue_range_mask(

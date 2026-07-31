@@ -6,8 +6,6 @@ import types
 import numpy as np
 import pytest
 
-from ._bootstrap import SRC  # noqa: F401
-
 from mujoco_servo.config import DepthConfig
 from mujoco_servo.depth import (
     DepthAnythingV2Backend,

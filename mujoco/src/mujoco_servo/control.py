@@ -108,7 +108,9 @@ class ResolvedRateController:
         if any(joint_id < 0 for joint_id in self._joint_ids):
             missing = [
                 name
-                for name, joint_id in zip(robot.joint_names, self._joint_ids)
+                for name, joint_id in zip(
+                    robot.joint_names, self._joint_ids, strict=True
+                )
                 if joint_id < 0
             ]
             raise RuntimeError(
@@ -237,7 +239,7 @@ class ResolvedRateController:
             self.robot.gripper_closed_ctrl if closed else self.robot.gripper_open_ctrl
         )
         self._passive_actuator_overrides.clear()
-        for name, value in zip(self.robot.gripper_actuator_names, values):
+        for name, value in zip(self.robot.gripper_actuator_names, values, strict=True):
             actuator_id = resolve_passive_actuator(self.model, self.robot, name, value)
             self._passive_actuator_overrides[actuator_id] = float(value)
 
@@ -602,7 +604,7 @@ class ResolvedRateController:
             )
             controls = generalized_torque / self._actuator_gears
         saturated = 0
-        for actuator_id, value in zip(self._actuator_ids, controls):
+        for actuator_id, value in zip(self._actuator_ids, controls, strict=True):
             saturated += int(self._write_ctrl(data, actuator_id, float(value)))
         for actuator_id, value in self._passive_actuator_ids:
             self._write_ctrl(

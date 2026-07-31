@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
-
-from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo import app as app_module
 from mujoco_servo.app import ManipulationState, TrackingState, VisualServoSimulation
@@ -375,7 +373,6 @@ def test_sync_viewer_perception_is_camera_fps_throttled(monkeypatch) -> None:
     def render():
         nonlocal calls
         calls += 1
-        return None
 
     monkeypatch.setattr(app, "_render_camera_observation", render)
     assert (
