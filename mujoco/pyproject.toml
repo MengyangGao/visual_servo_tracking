@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mujoco-servo"
-version = "0.4.0"
+version = "0.5.0"
 description = "MuJoCo IBVS/PBVS visual-servo and contact-manipulation learning platform"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",

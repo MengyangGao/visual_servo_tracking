@@ -32,6 +32,7 @@ def test_task_goal_modes() -> None:
     assert np.allclose(desired_ee_position("contact", target, ee, cfg), target)
     assert np.allclose(desired_ee_position("touch", target, ee, cfg), target)
     assert np.allclose(desired_ee_position("grasp", target, ee, cfg), target)
+    assert np.allclose(desired_ee_position("pick-place", target, ee, cfg), target)
     standoff = desired_ee_position("standoff", target, ee, cfg)
     assert np.isclose(np.linalg.norm(standoff - target), 0.2)
     front = desired_ee_position("front-standoff", target, ee, cfg)

@@ -4,12 +4,15 @@ import numpy as np
 
 from ._bootstrap import SRC  # noqa: F401
 
-from mujoco_servo.config import ROBOT_SPECS, CameraConfig
+from mujoco_servo.config import ROBOT_SPECS, CameraConfig, ControllerConfig
 from mujoco_servo.core import FeatureObservation, ServoMode
 from mujoco_servo.perception import CameraIntrinsics, CameraObservation
 from mujoco_servo.scene import build_scene
 from mujoco_servo.servo import VisualServoObjective
 from mujoco_servo.targets import TARGETS
+from mujoco_servo.humanoid import G1BimanualController, symmetric_handover_goals
+from mujoco_servo.app import VisualServoSimulation
+from mujoco_servo.config import DemoConfig
 from mujoco_servo.vision import (
     LabeledMeasurement,
     MultiTargetTracker,
@@ -85,3 +88,51 @@ def test_all_menagerie_profiles_compile_into_the_platform_scene() -> None:
         assert scene.source == "menagerie"
         assert scene.model.nv >= robot.dof
         assert set(scene.camera_names) == {"servo_camera", "servo_overview"}
+
+
+def test_g1_bimanual_controller_composes_disjoint_arm_commands() -> None:
+    scene = build_scene(TARGETS["cup"], CameraConfig(), ROBOT_SPECS["g1-right-arm"])
+    controller = G1BimanualController(
+        scene.model,
+        ControllerConfig(task="contact", smooth_target_alpha=1.0),
+    )
+    controller.reset(scene.data)
+    goals = symmetric_handover_goals(np.array([0.42, 0.0, 1.05]))
+    state = controller.step(scene.data, goals, 0.0, 0, 1.0 / 120.0)
+    assert np.isfinite(state.left.qpos_command).all()
+    assert np.isfinite(state.right.qpos_command).all()
+    assert state.left.qpos_command.shape == (7,)
+    assert state.right.qpos_command.shape == (7,)
+    left_ids = {
+        scene.model.actuator(name).id
+        for name in ROBOT_SPECS["g1-left-arm"].actuator_names
+    }
+    right_ids = {
+        scene.model.actuator(name).id
+        for name in ROBOT_SPECS["g1-right-arm"].actuator_names
+    }
+    assert left_ids.isdisjoint(right_ids)
+    assert np.isfinite(scene.data.ctrl[list(left_ids | right_ids)]).all()
+
+
+def test_g1_robot_specific_effort_gains_converge_for_both_arms() -> None:
+    for robot in ("g1-left-arm", "g1-right-arm"):
+        for actuator_mode in ("torque", "impedance"):
+            summary = VisualServoSimulation(
+                DemoConfig(
+                    robot=robot,
+                    target="cup",
+                    detector="oracle",
+                    trajectory="static",
+                    steps=600,
+                    headless=True,
+                    viewer=False,
+                    realtime=False,
+                    manual_control=False,
+                    controller=ControllerConfig(
+                        task="standoff", actuator_mode=actuator_mode
+                    ),
+                )
+            ).run()
+            assert summary.final_error_m < 0.001
+            assert summary.task_succeeded

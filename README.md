@@ -15,8 +15,10 @@
 - 从分割后的度量深度估计三维锚点、6D 主轴姿态和尺寸；
 - 提供带标签的多目标跟踪与短时遮挡预测；
 - 支持位置、速度、力矩和阻抗四种关节执行模式；
-- 支持跟踪、接近、接触、抓取、抬升及单轴对齐任务；
+- 支持跟踪、接近、接触、抓取、抬升、完整 pick-and-place 及单轴对齐任务；
+- 提供可解释抓取点评分、接触验证、放置验收、超时/滑移恢复和笛卡尔安全监督；
 - 通过 JSON 替换机器人和目标，也内置多种官方 MuJoCo Menagerie 本体；
+- 支持 Unitree G1 左/右臂视觉伺服和固定基座双臂协调原语；
 - 输出 16:9 仪表盘、MP4/MOV/AVI、运行指标和可复用 Python API。
 
 ## 真实接触抓取
@@ -24,6 +26,14 @@
 ![真实接触抓取](mujoco/media/contact-grasp-dashboard.gif)
 
 这段演示没有使用 weld、mocap 附着或位姿瞬移。成功条件要求两个不同手指同时接触目标、接触法向相反、法向力超过阈值、相对滑移受限，并连续保持若干控制帧。演示最终测得约 `2.18 N` 合法夹持力和 `0.13 mm/frame` 相对滑移，并完成约 `8.6 cm` 抬升。原始文件：[MP4](mujoco/media/contact-grasp-dashboard.mp4) · [PNG](mujoco/media/contact-grasp-dashboard.png)
+
+## 视觉抓取与放置策略
+
+![颜色视觉抓取与放置](mujoco/media/pick-place-dashboard.gif)
+
+这段 20 秒实录由颜色视觉和 MuJoCo RGB-D 驱动，策略依次完成目标获取、抓取点选择、预抓取、闭合、接触验证、抬升、搬运、放置、释放和撤离。它不读取目标真值来控制；MuJoCo 真值只用于最终验收。此次录制为 `COMPLETE`，0 次恢复，最终物体中心距落点 `12.8 mm`。原始文件：[MP4](mujoco/media/pick-place-dashboard.mp4) · [PNG](mujoco/media/pick-place-dashboard.png)
+
+抓取规划器会拒绝超过夹爪宽度、超出工作距离或侵入桌面的候选，再按可达性、相机可见性、宽度余量和净空排序。反应式策略在接触超时、夹持不稳定或搬运滑移时松爪、上撤并重新规划；重试次数有界。安全监督还会拒绝非有限命令，限制工作空间和单次目标距离，并在法向力超限时 fail closed。
 
 ## 安装（Miniconda）
 
@@ -97,6 +107,19 @@ conda run -n visual_servo mujoco-servo \
   --record mujoco/media/my-grasp.mp4
 ```
 
+颜色视觉 pick-and-place：
+
+```bash
+conda run -n visual_servo mujoco-servo \
+  --headless --no-realtime --scripted-target \
+  --robot panda --target grasp-cube --trajectory static \
+  --detector color --servo-mode pbvs --task pick-place \
+  --steps 2400 --camera-fps 24 \
+  --record mujoco/media/my-pick-place.mp4
+```
+
+用 `--place-position X Y Z` 指定物体中心落点；也可配置 `--policy-max-attempts`、阶段超时和最大接触力。省略落点时会选择桌面内部带安全裕量的位置。
+
 macOS 的交互 viewer 必须由 MuJoCo 的 `mjpython` 启动：
 
 ```bash
@@ -121,7 +144,10 @@ flowchart LR
   RGBD["RGB-D cameras"] --> P["color or open-vocabulary perception"]
   P --> F["2D features, mask, 3D anchor, 6D pose"]
   F --> V["IBVS / PBVS / Hybrid objective"]
+  F --> S["grasp candidates and reactive task policy"]
+  S --> Q["safety supervisor"]
   V --> C["constrained whole-arm controller"]
+  Q --> C
   C --> A["position / velocity / torque / impedance"]
   A --> M["MuJoCo dynamics and contacts"]
   M --> RGBD
@@ -129,6 +155,10 @@ flowchart LR
 ```
 
 ## Menagerie 本体
+
+![Unitree G1 固定基座上肢视觉伺服](mujoco/media/g1-visual-servo-dashboard.gif)
+
+这段 G1 右臂实录同样使用颜色视觉而非 oracle：目标持续处于 `TRACKING`，无丢失/重捕获事件，最终 16 cm standoff 误差为 `7.7 mm`。原始文件：[MP4](mujoco/media/g1-visual-servo-dashboard.mp4) · [PNG](mujoco/media/g1-visual-servo-dashboard.png)
 
 | CLI 名称 | 受控自由度 | 说明 |
 | --- | ---: | --- |
@@ -142,8 +172,9 @@ flowchart LR
 | `kinova-gen3` | 7 | Kinova Gen3 |
 | `sawyer` | 7 | Rethink Sawyer |
 | `g1-right-arm` | 7 | Unitree G1 固定基座右臂学习示例 |
+| `g1-left-arm` | 7 | Unitree G1 固定基座左臂学习示例 |
 
-所有条目都从锁定版本的 `mujoco/vendor/mujoco_menagerie` 加载。G1 示例固定浮动基座，用于上肢视觉伺服，不声称实现双足平衡。没有夹爪的工具端模型可以完成跟踪、接近和接触；要进行真实夹持，应通过机器人描述符声明实际夹爪执行器与两侧接触体。
+所有条目都从锁定版本的 `mujoco/vendor/mujoco_menagerie` 加载。G1 左右臂可分别运行完整视觉外环；`G1BimanualController` 可把同一视觉目标转换为左右手安全间距目标，并组合两个互不覆盖的 7-DoF 控制器。G1 示例固定浮动基座，只用于上肢视觉伺服/交接学习，不声称实现双足平衡或行走。没有夹爪的工具端模型可以完成跟踪、接近和接触；真实夹持需要描述符声明实际夹爪执行器与两侧接触体。
 
 ## 相机、6D 姿态和多目标
 
@@ -195,18 +226,20 @@ with VisualServoSimulation(config) as simulation:
 
 公共状态包括目标/末端/相机/关节位置、检测时间和协方差、跟踪状态、接触、抓取力、相对滑移和抬升高度。
 
+`pick-place` 的 `RunSummary` 还包含策略名称、尝试次数、选中抓取点、落点、放置误差、任务成功标志和失败原因。策略、抓取规划器与安全监督位于 `mujoco_servo.policy`，可脱离 viewer 单独测试或替换。
+
 ## 验证
 
 ```bash
 conda run -n visual_servo python -m pytest -q mujoco/tests
 conda run -n visual_servo ruff check mujoco/src mujoco/tests
 conda run -n visual_servo python -m mujoco_servo.benchmark \
-  --robots panda fr3 ur5e xarm7 g1-right-arm \
+  --robots panda fr3 ur5e xarm7 g1-left-arm g1-right-arm \
   --actuator-modes position velocity torque impedance \
   --trajectories static circle --steps 240
 ```
 
-测试覆盖配置校验、三种视觉外环、相机几何、颜色/语义后端、深度、6D 姿态、多目标遮挡、所有内置 Menagerie 场景、四种执行模式、接触抓取与运行指标。
+测试覆盖配置校验、三种视觉外环、相机几何、颜色/语义后端、深度、6D 姿态、多目标遮挡、所有内置 Menagerie 场景、四种执行模式、抓取候选排序、安全监督、接触抓取、pick-and-place 和 G1 双臂命令组合。
 
 ## 明确边界
 
@@ -214,6 +247,8 @@ conda run -n visual_servo python -m mujoco_servo.benchmark \
 - 开放词汇语义与单目深度依赖外部模型，首次运行需要网络和较多内存；自动设备顺序为 CUDA、Apple MPS、CPU。
 - 基于点云 PCA 的 6D 姿态对对称物体存在不可消除的轴向歧义。
 - 真实接触抓取依赖模型几何、摩擦和夹爪；不再用 weld 掩盖失败，因此任意新物体/本体都需要重新验证。
+- 当前策略是反应式笛卡尔状态机和局部抓取点规划，不是带障碍物地图的全局运动规划器；复杂杂乱场景仍需接入 OMPL/采样规划或学习策略。
+- G1 只验证固定基座上肢，不包含行走、质心/足底约束或跌倒恢复。
 - MuJoCo 动力学运行在 CPU；学习视觉可使用 CUDA/MPS，渲染使用平台 OpenGL 后端。
 
 模型许可和来源见 [mujoco/ASSETS.md](mujoco/ASSETS.md)。

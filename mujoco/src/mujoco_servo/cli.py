@@ -230,6 +230,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="pre-grasp stage transition tolerance in meters",
     )
     parser.add_argument(
+        "--place-position",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        default=None,
+        help="pick-place destination for the object centre in world meters",
+    )
+    parser.add_argument(
+        "--policy-max-attempts",
+        type=int,
+        default=2,
+        help="maximum grasp attempts before the policy fails closed",
+    )
+    parser.add_argument(
+        "--policy-close-timeout",
+        type=float,
+        default=2.5,
+        help="seconds allowed for contact-verified gripper closure",
+    )
+    parser.add_argument(
+        "--policy-motion-timeout",
+        type=float,
+        default=8.0,
+        help="seconds allowed for each lift, transfer, place or retreat motion",
+    )
+    parser.add_argument(
+        "--policy-max-force",
+        type=float,
+        default=80.0,
+        help="normal contact force safety threshold in newtons",
+    )
+    parser.add_argument(
         "--reacquire-confirm-frames",
         type=int,
         default=3,
@@ -356,6 +388,9 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         "--grasp-attach-distance": args.grasp_attach_distance,
         "--grasp-lift": args.grasp_lift,
         "--grasp-stage-tolerance": args.grasp_stage_tolerance,
+        "--policy-close-timeout": args.policy_close_timeout,
+        "--policy-motion-timeout": args.policy_motion_timeout,
+        "--policy-max-force": args.policy_max_force,
     }
     for option, value in positive_values.items():
         if not _is_finite(value) or value <= 0.0:
@@ -374,6 +409,12 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         raise argparse.ArgumentTypeError(
             "--reacquire-confirm-frames must be at least 1"
         )
+    if args.policy_max_attempts < 1:
+        raise argparse.ArgumentTypeError("--policy-max-attempts must be at least 1")
+    if args.place_position is not None and not all(
+        _is_finite(value) for value in args.place_position
+    ):
+        raise argparse.ArgumentTypeError("--place-position must contain finite values")
     if (
         not _is_finite(args.perception_drop_probability)
         or not 0.0 <= args.perception_drop_probability <= 1.0
@@ -427,6 +468,13 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         grasp_attach_distance_m=float(args.grasp_attach_distance),
         grasp_lift_m=float(args.grasp_lift),
         grasp_stage_tolerance_m=float(args.grasp_stage_tolerance),
+        place_position=None
+        if args.place_position is None
+        else tuple(float(value) for value in args.place_position),
+        policy_max_attempts=int(args.policy_max_attempts),
+        policy_close_timeout_s=float(args.policy_close_timeout),
+        policy_motion_timeout_s=float(args.policy_motion_timeout),
+        policy_max_normal_force_n=float(args.policy_max_force),
     )
     depth = DepthConfig(
         backend=args.depth_backend,

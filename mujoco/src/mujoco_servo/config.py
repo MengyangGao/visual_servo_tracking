@@ -121,6 +121,11 @@ class ControllerConfig:
     grasp_attach_distance_m: float = 0.065
     grasp_lift_m: float = 0.12
     grasp_stage_tolerance_m: float = 0.025
+    place_position: tuple[float, float, float] | None = None
+    policy_max_attempts: int = 2
+    policy_close_timeout_s: float = 2.5
+    policy_motion_timeout_s: float = 8.0
+    policy_max_normal_force_n: float = 80.0
 
 
 @dataclass(frozen=True)
@@ -157,6 +162,8 @@ class RobotSpec:
     gripper_closed_ctrl: tuple[float, ...] = ()
     gripper_contact_bodies: tuple[str, ...] = ()
     fixed_base: bool = False
+    torque_gain_scale: tuple[float, float] = (1.0, 1.0)
+    impedance_gain_scale: tuple[float, float] = (1.0, 1.0)
     schema_version: int = 1
 
     @property
@@ -379,6 +386,42 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         aliases=("unitree-g1", "unitree_g1", "g1"),
         grasp_attachment_body="right_wrist_yaw_link",
         fixed_base=True,
+        torque_gain_scale=(0.25, 0.5),
+        impedance_gain_scale=(0.35, 0.5),
+    ),
+    "g1-left-arm": RobotSpec(
+        name="g1-left-arm",
+        xml_path=MENAGERIE_HOME / "unitree_g1" / "g1_with_hands.xml",
+        asset_dir=MENAGERIE_HOME / "unitree_g1" / "assets",
+        joint_names=(
+            "left_shoulder_pitch_joint",
+            "left_shoulder_roll_joint",
+            "left_shoulder_yaw_joint",
+            "left_elbow_joint",
+            "left_wrist_roll_joint",
+            "left_wrist_pitch_joint",
+            "left_wrist_yaw_joint",
+        ),
+        actuator_names=(
+            "left_shoulder_pitch_joint",
+            "left_shoulder_roll_joint",
+            "left_shoulder_yaw_joint",
+            "left_elbow_joint",
+            "left_wrist_roll_joint",
+            "left_wrist_pitch_joint",
+            "left_wrist_yaw_joint",
+        ),
+        home_qpos=(0.0, 0.2, 0.0, 0.65, 0.0, 0.0, 0.0),
+        ee_frame_name="left_wrist_yaw_link",
+        ee_frame_type="body_point",
+        ee_frame_offset=(0.055, 0.0, 0.0),
+        default_target_position=(0.42, 0.32, 1.05),
+        detection_bounds=((-0.5, -0.4, 0.4), (0.9, 0.9, 1.8)),
+        aliases=("unitree-g1-left", "unitree_g1_left", "g1-left"),
+        grasp_attachment_body="left_wrist_yaw_link",
+        fixed_base=True,
+        torque_gain_scale=(0.25, 0.5),
+        impedance_gain_scale=(0.35, 0.5),
     ),
 }
 
@@ -430,6 +473,7 @@ def available_tasks() -> tuple[str, ...]:
         "contact",
         "touch",
         "grasp",
+        "pick-place",
         "standoff",
         "front-standoff",
         "align-x",
@@ -597,9 +641,21 @@ def _validate_controller_config(config: ControllerConfig) -> None:
         "grasp_stage_tolerance_m": _finite_number(
             config.grasp_stage_tolerance_m, "grasp_stage_tolerance_m"
         ),
+        "policy_close_timeout_s": _finite_number(
+            config.policy_close_timeout_s, "policy_close_timeout_s"
+        ),
+        "policy_motion_timeout_s": _finite_number(
+            config.policy_motion_timeout_s, "policy_motion_timeout_s"
+        ),
+        "policy_max_normal_force_n": _finite_number(
+            config.policy_max_normal_force_n, "policy_max_normal_force_n"
+        ),
     }
     if config.grasp_point is not None:
         _validate_nonempty_text(config.grasp_point, "grasp_point")
+    if config.place_position is not None:
+        _finite_vector(config.place_position, 3, "place_position")
+    _validate_integer(config.policy_max_attempts, "policy_max_attempts", minimum=1)
     actuator_mode = _normalized_text(config.actuator_mode, "actuator_mode")
     if actuator_mode not in available_actuator_modes():
         raise ValueError(
@@ -654,6 +710,12 @@ def _validate_controller_config(config: ControllerConfig) -> None:
         raise ValueError("grasp_lift_m must be positive")
     if values["grasp_stage_tolerance_m"] <= 0.0:
         raise ValueError("grasp_stage_tolerance_m must be positive")
+    if values["policy_close_timeout_s"] <= 0.0:
+        raise ValueError("policy_close_timeout_s must be positive")
+    if values["policy_motion_timeout_s"] <= 0.0:
+        raise ValueError("policy_motion_timeout_s must be positive")
+    if values["policy_max_normal_force_n"] <= 0.0:
+        raise ValueError("policy_max_normal_force_n must be positive")
 
 
 def _validate_environment_spec(config: EnvironmentSpec) -> None:
@@ -781,6 +843,8 @@ _ROBOT_OPTIONAL_FIELDS = {
     "gripper_closed_ctrl",
     "gripper_contact_bodies",
     "fixed_base",
+    "torque_gain_scale",
+    "impedance_gain_scale",
 }
 
 
@@ -934,6 +998,14 @@ def _robot_from_mapping(entry: dict[str, Any], base_dir: Path, index: int) -> Ro
     fixed_base = entry.get("fixed_base", False)
     if not isinstance(fixed_base, bool):
         raise ValueError(f"robot '{name}'.fixed_base must be a boolean")
+    torque_gain_scale = _parse_gain_scale(
+        entry.get("torque_gain_scale", [1.0, 1.0]),
+        f"robot '{name}'.torque_gain_scale",
+    )
+    impedance_gain_scale = _parse_gain_scale(
+        entry.get("impedance_gain_scale", [1.0, 1.0]),
+        f"robot '{name}'.impedance_gain_scale",
+    )
 
     if not xml_path.is_file():
         raise FileNotFoundError(
@@ -966,6 +1038,8 @@ def _robot_from_mapping(entry: dict[str, Any], base_dir: Path, index: int) -> Ro
         gripper_closed_ctrl=gripper_closed_ctrl,
         gripper_contact_bodies=gripper_contact_bodies,
         fixed_base=fixed_base,
+        torque_gain_scale=torque_gain_scale,
+        impedance_gain_scale=impedance_gain_scale,
         schema_version=schema_version,
     )
 
@@ -1044,6 +1118,15 @@ def _optional_positive_number(value: Any, field_name: str) -> float | None:
     if number <= 0.0:
         raise ValueError(f"{field_name} must be positive")
     return number
+
+
+def _parse_gain_scale(value: Any, field_name: str) -> tuple[float, float]:
+    kp_scale, kd_scale = _json_number_vector(value, 2, field_name)
+    if kp_scale <= 0.0:
+        raise ValueError(f"{field_name} proportional scale must be positive")
+    if kd_scale < 0.0:
+        raise ValueError(f"{field_name} derivative scale must be non-negative")
+    return float(kp_scale), float(kd_scale)
 
 
 def _parse_ee_frame(

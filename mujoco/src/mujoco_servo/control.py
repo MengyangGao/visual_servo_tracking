@@ -45,7 +45,7 @@ def desired_ee_position(
     target = np.asarray(target_position, dtype=float).reshape(3)
     ee = np.asarray(ee_position, dtype=float).reshape(3)
     mode = task.strip().lower()
-    if mode in {"contact", "touch", "grasp"}:
+    if mode in {"contact", "touch", "grasp", "pick-place"}:
         return target.copy()
     if mode == "standoff":
         direction = normalize(ee - target, np.array([-1.0, 0.0, 0.0]))
@@ -523,11 +523,13 @@ class ResolvedRateController:
             ) + bias / (self._actuator_gears * gains)
         else:
             if mode == "impedance":
-                kp = float(getattr(self.config, "impedance_kp", 35.0))
-                kd = float(getattr(self.config, "impedance_kd", 6.0))
+                kp_scale, kd_scale = self.robot.impedance_gain_scale
+                kp = float(getattr(self.config, "impedance_kp", 35.0)) * kp_scale
+                kd = float(getattr(self.config, "impedance_kd", 6.0)) * kd_scale
             else:
-                kp = float(getattr(self.config, "torque_kp", 80.0))
-                kd = float(getattr(self.config, "torque_kd", 8.0))
+                kp_scale, kd_scale = self.robot.torque_gain_scale
+                kp = float(getattr(self.config, "torque_kp", 80.0)) * kp_scale
+                kd = float(getattr(self.config, "torque_kd", 8.0)) * kd_scale
             generalized_torque = (
                 np.asarray(data.qfrc_bias[self._dof_adr], dtype=float)
                 + kp * (np.asarray(position_reference, dtype=float) - current_qpos)

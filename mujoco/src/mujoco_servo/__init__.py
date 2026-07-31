@@ -15,12 +15,21 @@ from .config import (
     TargetSpec,
 )
 from .scene import WorldGraspPoint
+from .humanoid import (
+    BimanualGoals,
+    BimanualServoState,
+    G1BimanualController,
+    symmetric_handover_goals,
+)
 
 __all__ = [
     "CameraConfig",
+    "BimanualGoals",
+    "BimanualServoState",
     "ControllerConfig",
     "DemoConfig",
     "GraspPoint",
+    "G1BimanualController",
     "ManipulationState",
     "RunSummary",
     "RobotSpec",
@@ -30,4 +39,5 @@ __all__ = [
     "VisualServoSimulation",
     "WorldGraspPoint",
     "run_demo",
+    "symmetric_handover_goals",
 ]

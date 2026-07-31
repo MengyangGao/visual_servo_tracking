@@ -18,6 +18,7 @@ class DashboardTelemetry:
     position_error_m: float
     image_error_px: float
     contact_force_n: float = 0.0
+    policy_phase: str | None = None
 
 
 class DashboardRenderer:
@@ -62,7 +63,7 @@ class DashboardRenderer:
             ("SERVO", telemetry.servo_mode.upper()),
             ("ACTUATOR", telemetry.actuator_mode.upper()),
             ("TRACKING", telemetry.tracking_state),
-            ("TASK", telemetry.manipulation_state),
+            ("TASK", telemetry.policy_phase or telemetry.manipulation_state),
             ("TIME", f"{telemetry.sim_time_s:6.2f} s"),
             ("POSITION", f"{1000.0 * telemetry.position_error_m:6.1f} mm"),
             ("IMAGE", f"{telemetry.image_error_px:6.1f} px"),

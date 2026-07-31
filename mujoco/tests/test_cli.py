@@ -454,6 +454,18 @@ def test_cli_exposes_actuation_latency_and_environment_controls() -> None:
             "0.15",
             "--grasp-stage-tolerance",
             "0.02",
+            "--place-position",
+            "0.5",
+            "-0.1",
+            "0.25",
+            "--policy-max-attempts",
+            "3",
+            "--policy-close-timeout",
+            "3.0",
+            "--policy-motion-timeout",
+            "9.0",
+            "--policy-max-force",
+            "60.0",
             "--reacquire-confirm-frames",
             "4",
             "--perception-latency",
@@ -479,6 +491,11 @@ def test_cli_exposes_actuation_latency_and_environment_controls() -> None:
     assert config.controller.grasp_attach_distance_m == 0.07
     assert config.controller.grasp_lift_m == 0.15
     assert config.controller.grasp_stage_tolerance_m == 0.02
+    assert config.controller.place_position == (0.5, -0.1, 0.25)
+    assert config.controller.policy_max_attempts == 3
+    assert config.controller.policy_close_timeout_s == 3.0
+    assert config.controller.policy_motion_timeout_s == 9.0
+    assert config.controller.policy_max_normal_force_n == 60.0
     assert config.reacquire_confirm_frames == 4
     assert config.perception_latency_s == 0.08
     assert config.perception_jitter_s == 0.01
@@ -558,6 +575,8 @@ def test_robot_descriptor_schema_version_and_grasp_metadata(tmp_path: Path) -> N
             "gripper_actuator_names": ["gripper"],
             "gripper_open_ctrl": [0.5],
             "gripper_closed_ctrl": [0.0],
+            "torque_gain_scale": [0.5, 0.75],
+            "impedance_gain_scale": [0.4, 0.6],
         }
     )
     path, _ = _write_robot_descriptor(
@@ -567,6 +586,8 @@ def test_robot_descriptor_schema_version_and_grasp_metadata(tmp_path: Path) -> N
     assert spec.schema_version == 1
     assert spec.grasp_attachment_body == "tool_body"
     assert spec.gripper_actuator_names == ("gripper",)
+    assert spec.torque_gain_scale == (0.5, 0.75)
+    assert spec.impedance_gain_scale == (0.4, 0.6)
     descriptor["schema_version"] = 2
     path, _ = _write_robot_descriptor(tmp_path, descriptor)
     with pytest.raises(ValueError, match="unsupported"):

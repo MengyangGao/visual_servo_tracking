@@ -937,3 +937,31 @@ def test_panda_gripper_command_remains_closed_after_grasp() -> None:
     assert summary.grasped
     actuator_id = app.scene.model.actuator("actuator8").id
     assert app.scene.data.ctrl[actuator_id] == 0.0
+
+
+def test_reactive_pick_place_completes_with_physical_contact_and_release() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            robot="panda",
+            target="grasp-cube",
+            detector="oracle",
+            trajectory="static",
+            steps=3200,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            manual_control=False,
+            controller=ControllerConfig(task="pick-place", servo_mode="pbvs"),
+        )
+    )
+    summary = app.run()
+    assert summary.manipulation_state == ManipulationState.COMPLETE.value
+    assert summary.task_succeeded
+    assert not summary.grasped
+    assert summary.policy_name == "reactive-pick-place"
+    assert summary.policy_phase == "SUCCEEDED"
+    assert summary.policy_attempts == 0
+    assert summary.selected_grasp == "center"
+    assert summary.place_error_m is not None
+    assert summary.place_error_m <= 0.035
+    assert summary.contact_steps > 0

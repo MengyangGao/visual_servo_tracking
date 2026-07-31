@@ -16,6 +16,7 @@ The repository pins Google DeepMind MuJoCo Menagerie as `mujoco/vendor/mujoco_me
 | `kinova-gen3` | `kinova_gen3/gen3.xml` | tool attachment only |
 | `sawyer` | `rethink_robotics_sawyer/sawyer.xml` | tool attachment only |
 | `g1-right-arm` | `unitree_g1/g1_with_hands.xml` | fixed-base upper-body example |
+| `g1-left-arm` | `unitree_g1/g1_with_hands.xml` | fixed-base upper-body example |
 
 Initialize and inspect the pinned checkout with:
 
@@ -62,6 +63,8 @@ Preserve Menagerie's top-level `LICENSE`, `CITATION.cff`, and model-specific att
       "gripper_open_ctrl": [1.0],
       "gripper_closed_ctrl": [0.0],
       "gripper_contact_bodies": ["left_finger", "right_finger"],
+      "torque_gain_scale": [1.0, 1.0],
+      "impedance_gain_scale": [1.0, 1.0],
       "passive_actuator_ctrl": {},
       "aliases": ["arm-alias"]
     }
@@ -80,6 +83,8 @@ Controlled joints must be named scalar hinge/slide joints, and each named actuat
 - controlled actuator rewriting to torque/impedance motors.
 
 Passive actuators, such as a gripper, are not rewritten. A custom MJCF must currently be a self-contained `<mujoco>` document; `<include>` is rejected. Reachability, collision safety, actuator tuning, and controller stability cannot be inferred from the descriptor alone.
+
+`torque_gain_scale` and `impedance_gain_scale` multiply the global CLI proportional/derivative gains for a specific robot. This keeps one user-facing tuning interface while allowing models with very different reflected inertia and force limits to ship stable defaults. Both fields default to `[1.0, 1.0]`; the proportional scale must be positive and the derivative scale non-negative.
 
 ## Target descriptor version 1
 
