@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from textwrap import dedent
-import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
@@ -37,9 +37,12 @@ class Scene:
     target_body_name: str = "target"
     target_site_name: str = "target_site"
     camera_name: str = "servo_camera"
+    camera_names: tuple[str, ...] = ("servo_camera", "servo_overview")
     actuator_mode: str = "position"
-    grasp_weld_name: str | None = None
     grasp_attachment_body: str | None = None
+    support_z: float = 0.0
+    work_surface_center_xy: tuple[float, float] | None = None
+    work_surface_half_size_xy: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -276,6 +279,15 @@ def _tracking_worldbody_xml(
             f'<camera name="{camera_name}" pos="0 0 0" xyaxes="{xyaxes}" fovy="{camera.fovy_deg:.3f}"/>'
             "</body>"
         )
+    overview_pos = np.asarray(target_pos, dtype=float) + np.array([-0.95, 1.05, 0.72])
+    overview_x, overview_y = look_at_xyaxes(
+        overview_pos, np.asarray(target_pos, dtype=float)
+    )
+    overview_axes = " ".join(f"{v:.6f}" for v in np.r_[overview_x, overview_y])
+    camera_worldbody += (
+        f'<camera name="servo_overview" pos="{overview_pos[0]:.5f} {overview_pos[1]:.5f} {overview_pos[2]:.5f}" '
+        f'xyaxes="{overview_axes}" fovy="52"/>'
+    )
     lights = ""
     if environment.add_lights:
         lights = dedent(
@@ -301,12 +313,6 @@ def _tracking_worldbody_xml(
         target_body_open = f'<body name="target" pos="{target_pos[0]:.5f} {target_pos[1]:.5f} {target_pos[2]:.5f}" quat="{quat}"><freejoint name="target_freejoint"/>'
     else:
         target_body_open = f'<body name="target" mocap="true" pos="{target_pos[0]:.5f} {target_pos[1]:.5f} {target_pos[2]:.5f}" quat="{quat}">'
-    equality = ""
-    if target.dynamics == "physical" and grasp_attachment_body:
-        equality = (
-            '<equality><weld name="servo_grasp_weld" '
-            f'body1="{_xml_attr(grasp_attachment_body)}" body2="target" active="false"/></equality>'
-        )
     return dedent(
         f"""
         <visual>
@@ -335,7 +341,6 @@ def _tracking_worldbody_xml(
             <site name="target_site" pos="0 0 0" size="0.012" rgba="1 1 1 1"/>
           </body>
         </worldbody>
-        {equality}
         """
     ).strip()
 
@@ -363,6 +368,8 @@ def build_menagerie_mjcf(
             "provide a self-contained MJCF file"
         )
     _name_declared_unnamed_actuators(root, robot)
+    if robot.fixed_base:
+        _fix_robot_base(root, robot)
     _rewrite_controlled_actuators(root, robot, actuator_mode)
     _reject_injected_name_collisions(root, target, camera, robot)
     if camera.mount_body is not None:
@@ -405,6 +412,24 @@ def build_menagerie_mjcf(
         raise RuntimeError(f"generated tracking scene is not valid XML: {exc}") from exc
     root.extend(list(fragment))
     return ET.tostring(root, encoding="unicode")
+
+
+def _fix_robot_base(root: ET.Element, robot: RobotSpec) -> None:
+    """Create a deterministic fixed-base variant of a Menagerie mobile model."""
+    removed = False
+    for parent in root.iter():
+        for child in list(parent):
+            if child.tag.rsplit("}", 1)[-1] == "freejoint":
+                parent.remove(child)
+                removed = True
+    if not removed:
+        raise RuntimeError(
+            f"robot '{robot.name}' requested fixed_base but has no freejoint"
+        )
+    # Source keyframes encode the removed free-base qpos and no longer match nq.
+    for keyframe in list(root):
+        if keyframe.tag.rsplit("}", 1)[-1] == "keyframe":
+            root.remove(keyframe)
 
 
 def _absolutize_stripped_robot_assets(
@@ -478,7 +503,9 @@ def _name_declared_unnamed_actuators(root: ET.Element, robot: RobotSpec) -> None
     existing_names = {
         element.get("name") for element in actuators if element.get("name")
     }
-    for joint_name, actuator_name in zip(robot.joint_names, robot.actuator_names):
+    for joint_name, actuator_name in zip(
+        robot.joint_names, robot.actuator_names, strict=True
+    ):
         if actuator_name in existing_names:
             continue
         candidates = [
@@ -513,7 +540,9 @@ def _rewrite_controlled_actuators(
         for element in actuator_section
         if element.get("name")
     }
-    for actuator_name, joint_name in zip(robot.actuator_names, robot.joint_names):
+    for actuator_name, joint_name in zip(
+        robot.actuator_names, robot.joint_names, strict=True
+    ):
         element = by_name.get(actuator_name)
         if element is None:
             raise RuntimeError(
@@ -559,13 +588,12 @@ def _reject_injected_name_collisions(
     reserved = {
         "body": {"camera_marker", "target"},
         "site": {"target_site"},
-        "camera": {camera.name},
+        "camera": {camera.name, "servo_overview"},
         "geom": geom_names,
         "light": {"servo_key", "servo_fill", "servo_rim"},
         "texture": {"servo_groundplane_tex"},
         "material": {"servo_groundplane", "servo_table_mat"},
         "mesh": mesh_names,
-        "weld": {"servo_grasp_weld"},
     }
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1]
@@ -590,6 +618,7 @@ def build_scene(
     environment: EnvironmentSpec | None = None,
 ) -> Scene:
     cam = camera or CameraConfig()
+    environment = environment or EnvironmentSpec()
     robot_spec = resolve_robot(robot) if isinstance(robot, str) else robot
     mode = actuator_mode.strip().lower()
     if mode not in available_actuator_modes():
@@ -680,11 +709,14 @@ def build_scene(
         if robot_spec.ee_frame_type in {"body", "body_point"}
         else None,
         camera_name=cam.name,
+        camera_names=(cam.name, "servo_overview"),
         actuator_mode=mode,
-        grasp_weld_name="servo_grasp_weld"
-        if target.dynamics == "physical" and robot_spec.grasp_attachment_body
-        else None,
         grasp_attachment_body=robot_spec.grasp_attachment_body,
+        support_z=0.215 if environment.add_table else 0.0,
+        work_surface_center_xy=(float(target_pos[0]), float(target_pos[1]))
+        if environment.add_table
+        else None,
+        work_surface_half_size_xy=(0.18, 0.18) if environment.add_table else None,
     )
 
 
@@ -807,7 +839,7 @@ def _validate_actuator_mode(
             and model.actuator_biastype[actuator_id] == mujoco.mjtBias.mjBIAS_AFFINE
             and np.isclose(velocity_bias, -gain, rtol=1e-4, atol=1e-8)
         )
-    elif actuator_mode == "torque":
+    elif actuator_mode in {"torque", "impedance"}:
         valid = (
             valid and model.actuator_biastype[actuator_id] == mujoco.mjtBias.mjBIAS_NONE
         )
@@ -899,13 +931,9 @@ def activate_grasp(
     *,
     max_distance_m: float = 0.08,
 ) -> WorldGraspPoint:
-    if (
-        scene.target.dynamics != "physical"
-        or scene.grasp_weld_name is None
-        or scene.grasp_attachment_body is None
-    ):
+    if scene.target.dynamics != "physical" or scene.grasp_attachment_body is None:
         raise RuntimeError(
-            "grasp attachment requires a physical target and a robot grasp_attachment_body"
+            "grasp requires a physical target and a robot grasp_attachment_body"
         )
     point = grasp_point_world(scene, grasp_point)
     ee_position = frame_position(
@@ -927,45 +955,12 @@ def activate_grasp(
             raise RuntimeError(
                 f"grasp width {point.width_m:.3f} m exceeds robot opening {scene.robot.max_gripper_width_m:.3f} m"
             )
-    equality_id = mujoco.mj_name2id(
-        scene.model, mujoco.mjtObj.mjOBJ_EQUALITY, scene.grasp_weld_name
-    )
-    if equality_id < 0:
-        raise KeyError(f"grasp equality '{scene.grasp_weld_name}' missing")
-    attachment_id = mujoco.mj_name2id(
-        scene.model, mujoco.mjtObj.mjOBJ_BODY, scene.grasp_attachment_body
-    )
-    target_id = mujoco.mj_name2id(
-        scene.model, mujoco.mjtObj.mjOBJ_BODY, scene.target_body_name
-    )
-    if attachment_id < 0:
-        raise KeyError(f"grasp attachment body '{scene.grasp_attachment_body}' missing")
-    attachment_rotation = np.asarray(
-        scene.data.xmat[attachment_id], dtype=float
-    ).reshape(3, 3)
-    target_rotation = np.asarray(scene.data.xmat[target_id], dtype=float).reshape(3, 3)
-    relative_position = attachment_rotation.T @ (
-        np.asarray(scene.data.xpos[target_id], dtype=float)
-        - np.asarray(scene.data.xpos[attachment_id], dtype=float)
-    )
-    relative_rotation = attachment_rotation.T @ target_rotation
-    relative_quat = np.empty(4, dtype=float)
-    mujoco.mju_mat2Quat(relative_quat, relative_rotation.reshape(-1))
-    scene.model.eq_data[equality_id, 3:6] = relative_position
-    scene.model.eq_data[equality_id, 6:10] = relative_quat
-    scene.data.eq_active[equality_id] = True
     _write_gripper_controls(scene, closed=True)
     mujoco.mj_forward(scene.model, scene.data)
     return point
 
 
 def deactivate_grasp(scene: Scene) -> None:
-    if scene.grasp_weld_name is not None:
-        equality_id = mujoco.mj_name2id(
-            scene.model, mujoco.mjtObj.mjOBJ_EQUALITY, scene.grasp_weld_name
-        )
-        if equality_id >= 0:
-            scene.data.eq_active[equality_id] = False
     _write_gripper_controls(scene, closed=False)
     mujoco.mj_forward(scene.model, scene.data)
 
@@ -990,7 +985,9 @@ def _write_gripper_controls(scene: Scene, *, closed: bool) -> None:
     values = (
         scene.robot.gripper_closed_ctrl if closed else scene.robot.gripper_open_ctrl
     )
-    for actuator_name, value in zip(scene.robot.gripper_actuator_names, values):
+    for actuator_name, value in zip(
+        scene.robot.gripper_actuator_names, values, strict=True
+    ):
         actuator_id = resolve_passive_actuator(
             scene.model, scene.robot, actuator_name, value
         )

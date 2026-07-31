@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import json
+from dataclasses import replace
 
 import cv2
-import numpy as np
 import mujoco
+import numpy as np
 import pytest
 
-from ._bootstrap import SRC  # noqa: F401
-
-from mujoco_servo.config import CameraConfig, EnvironmentSpec, RobotSpec
 from mujoco_servo.app import VisualServoSimulation
-from mujoco_servo.config import DemoConfig
+from mujoco_servo.config import CameraConfig, DemoConfig, EnvironmentSpec, RobotSpec
 from mujoco_servo.scene import (
     activate_grasp,
     build_scene,
@@ -152,13 +149,17 @@ def test_scene_uses_robot_default_target_position_and_supports_no_keyframe(
     )
     assert np.allclose(
         camera_position(scene.model, scene.data, scene.camera_name),
-        scene.data.cam_xpos[0],
+        scene.data.cam_xpos[
+            mujoco.mj_name2id(
+                scene.model, mujoco.mjtObj.mjOBJ_CAMERA, scene.camera_name
+            )
+        ],
     )
 
 
 def test_scene_rejects_robot_mjcf_include_with_clear_error(tmp_path) -> None:
     robot = _write_minimal_robot(tmp_path, include=True)
-    with pytest.raises(RuntimeError, match="uses <include>.*self-contained"):
+    with pytest.raises(RuntimeError, match=r"uses <include>.*self-contained"):
         build_scene(resolve_target("box"), robot=robot)
 
 
@@ -239,7 +240,7 @@ def test_scene_rejects_non_joint_actuator_transmission_with_colliding_id(
 
 def test_scene_rejects_home_position_outside_joint_range(tmp_path) -> None:
     robot = replace(_write_minimal_robot(tmp_path), home_qpos=(10.0,))
-    with pytest.raises(RuntimeError, match="home_qpos.*must be within"):
+    with pytest.raises(RuntimeError, match=r"home_qpos.*must be within"):
         build_scene(resolve_target("box"), robot=robot)
 
 
@@ -250,7 +251,7 @@ def test_scene_rejects_home_position_outside_actuator_control_range(tmp_path) ->
         'joint="minimal_joint" kp="100" ctrlrange="-0.1 0.1"',
     )
     robot.xml_path.write_text(text)
-    with pytest.raises(RuntimeError, match="maps to control.*outside actuator"):
+    with pytest.raises(RuntimeError, match=r"maps to control.*outside actuator"):
         build_scene(resolve_target("box"), robot=robot)
 
 
@@ -265,7 +266,7 @@ def test_scene_rejects_passive_actuator_constant_outside_control_range(
     robot.xml_path.write_text(text)
     robot = replace(robot, passive_actuator_ctrl=(("passive_actuator", 2.0),))
     with pytest.raises(
-        RuntimeError, match="passive actuator 'passive_actuator'.*outside range"
+        RuntimeError, match=r"passive actuator 'passive_actuator'.*outside range"
     ):
         build_scene(resolve_target("box"), robot=robot)
 
@@ -380,7 +381,7 @@ def test_target_file_normalizes_quaternion_and_rejects_zero(tmp_path) -> None:
     assert np.allclose(target.parts[0].quat, [1.0, 0.0, 0.0, 0.0])
     payload["targets"][0]["parts"][0]["quat"] = [0.0, 0.0, 0.0, 0.0]
     target_file.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="quaternion|quat.*non-zero"):
+    with pytest.raises(ValueError, match=r"quaternion|quat.*non-zero"):
         load_target_specs(target_file)
 
 
@@ -414,7 +415,7 @@ def test_target_file_rejects_inconsistent_round_geometry_sizes(
     target_file.write_text(
         json.dumps([{"name": "bad-round", "shape": shape, "size": size}])
     )
-    with pytest.raises(ValueError, match="equal|diameter|height"):
+    with pytest.raises(ValueError, match=r"equal|diameter|height"):
         load_target_specs(target_file)
 
 
@@ -610,7 +611,7 @@ def test_target_file_rejects_invalid_mesh_scale_and_missing_file(tmp_path) -> No
         "size": [0.1, 0.1, 0.1],
     }
     target_file.write_text(json.dumps({"targets": [target]}))
-    with pytest.raises(ValueError, match="scale.*positive"):
+    with pytest.raises(ValueError, match=r"scale.*positive"):
         load_target_specs(target_file)
     target["mesh_file"] = "missing.obj"
     target["scale"] = [1.0, 1.0, 1.0]
@@ -839,7 +840,7 @@ def test_physical_target_falls_onto_table_and_has_contact(tmp_path) -> None:
     assert scene.data.ncon > 0
 
 
-def test_grasp_points_transform_to_world_and_weld_can_toggle(tmp_path) -> None:
+def test_grasp_points_transform_and_grasp_command_adds_no_weld(tmp_path) -> None:
     target_file = tmp_path / "targets.json"
     target_file.write_text(
         json.dumps(
@@ -879,12 +880,11 @@ def test_grasp_points_transform_to_world_and_weld_can_toggle(tmp_path) -> None:
     assert np.allclose(point.position, [0.0, 0.0, 0.40])
     assert np.allclose(point.approach, [0.0, 0.0, -1.0])
     activate_grasp(scene, "top", max_distance_m=0.2)
-    equality_id = mujoco.mj_name2id(
-        scene.model, mujoco.mjtObj.mjOBJ_EQUALITY, "servo_grasp_weld"
+    assert (
+        mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_EQUALITY, "servo_grasp_weld")
+        == -1
     )
-    assert scene.data.eq_active[equality_id]
     deactivate_grasp(scene)
-    assert not scene.data.eq_active[equality_id]
 
 
 def test_default_grasp_point_is_top_down() -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +55,7 @@ class PhaseAccumulatorClock:
         exact_cumulative_steps = next_ticks / (self.control_hz * self.physics_dt_s)
         # Avoid Python's ties-to-even round: nearest-step phase is easier to
         # reason about and remains deterministic across platforms.
-        cumulative_steps = int(math.floor(exact_cumulative_steps + 0.5))
+        cumulative_steps = math.floor(exact_cumulative_steps + 0.5)
         substeps = cumulative_steps - self._physics_steps
         if substeps < 1:
             # The constructor prevents a genuinely faster-than-physics clock;

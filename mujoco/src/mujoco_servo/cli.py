@@ -12,9 +12,11 @@ from .config import (
     DepthConfig,
     EnvironmentSpec,
     available_actuator_modes,
+    available_camera_roles,
     available_depth_backends,
     available_detectors,
     available_robots,
+    available_servo_modes,
     available_tasks,
     available_trajectories,
     validate_config,
@@ -58,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="standoff",
         choices=available_tasks(),
         help="servo objective",
+    )
+    parser.add_argument(
+        "--servo-mode",
+        default="hybrid",
+        choices=available_servo_modes(),
+        help="visual feedback law: image-based, pose-based, or hybrid",
     )
     parser.add_argument(
         "--detector",
@@ -147,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--standoff-cm",
         type=float,
-        default=16.0,
+        default=10.0,
         help="standoff distance in centimeters for standoff/front-standoff",
     )
     parser.add_argument(
@@ -175,6 +183,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="joint-space torque controller derivative gain",
     )
     parser.add_argument(
+        "--impedance-kp",
+        type=float,
+        default=35.0,
+        help="joint-space impedance stiffness",
+    )
+    parser.add_argument(
+        "--impedance-kd",
+        type=float,
+        default=6.0,
+        help="joint-space impedance damping",
+    )
+    parser.add_argument(
         "--joint-limit-margin",
         type=float,
         default=0.05,
@@ -195,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--grasp-attach-distance",
         type=float,
         default=0.065,
-        help="maximum weld activation distance in meters",
+        help="maximum distance for starting physical gripper closure",
     )
     parser.add_argument(
         "--grasp-lift",
@@ -208,6 +228,73 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.025,
         help="pre-grasp stage transition tolerance in meters",
+    )
+    parser.add_argument(
+        "--place-position",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        default=None,
+        help="pick-place destination for the object centre in world meters",
+    )
+    parser.add_argument(
+        "--policy-max-attempts",
+        type=int,
+        default=2,
+        help="maximum grasp attempts before the policy fails closed",
+    )
+    parser.add_argument(
+        "--policy-close-timeout",
+        type=float,
+        default=2.5,
+        help="seconds allowed for contact-verified gripper closure",
+    )
+    parser.add_argument(
+        "--policy-motion-timeout",
+        type=float,
+        default=8.0,
+        help="seconds allowed for each lift, transfer, place or retreat motion",
+    )
+    parser.add_argument(
+        "--policy-max-force",
+        type=float,
+        default=80.0,
+        help="normal contact force safety threshold in newtons",
+    )
+    parser.add_argument(
+        "--grasp-min-force",
+        type=float,
+        default=0.15,
+        help="minimum summed opposing-finger force for a verified grasp",
+    )
+    parser.add_argument(
+        "--grasp-max-slip",
+        type=float,
+        default=0.006,
+        help="maximum per-step target/tool relative slip in meters",
+    )
+    parser.add_argument(
+        "--grasp-confirmation-frames",
+        type=int,
+        default=8,
+        help="consecutive stable contact frames required before lifting",
+    )
+    parser.add_argument(
+        "--grasp-lost-frames",
+        type=int,
+        default=20,
+        help="unstable frames tolerated before declaring a dropped object",
+    )
+    parser.add_argument(
+        "--policy-place-tolerance",
+        type=float,
+        default=0.035,
+        help="visual placement acceptance radius in meters",
+    )
+    parser.add_argument(
+        "--no-stop-on-terminal",
+        action="store_true",
+        help="continue to the step budget after task success or failure",
     )
     parser.add_argument(
         "--reacquire-confirm-frames",
@@ -270,6 +357,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="robot body for an eye-in-hand camera; default is world-fixed",
     )
     parser.add_argument(
+        "--camera-role",
+        default="external",
+        choices=available_camera_roles(),
+        help="external camera or eye-in-hand camera mounted to --camera-mount-body",
+    )
+    parser.add_argument(
         "--rgb-noise-std",
         type=float,
         default=0.0,
@@ -286,6 +379,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="camera frame dropout probability",
+    )
+    parser.add_argument(
+        "--record",
+        dest="record_path",
+        default=None,
+        help="write the presentation dashboard to an MP4/MOV/AVI file",
     )
     return parser
 
@@ -318,17 +417,25 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         "--control-hz": args.control_hz,
         "--max-joint-accel": args.max_joint_accel,
         "--torque-kp": args.torque_kp,
+        "--impedance-kp": args.impedance_kp,
         "--settling-threshold": args.settling_threshold,
         "--grasp-approach": args.grasp_approach,
         "--grasp-attach-distance": args.grasp_attach_distance,
         "--grasp-lift": args.grasp_lift,
         "--grasp-stage-tolerance": args.grasp_stage_tolerance,
+        "--policy-close-timeout": args.policy_close_timeout,
+        "--policy-motion-timeout": args.policy_motion_timeout,
+        "--policy-max-force": args.policy_max_force,
+        "--grasp-min-force": args.grasp_min_force,
+        "--grasp-max-slip": args.grasp_max_slip,
+        "--policy-place-tolerance": args.policy_place_tolerance,
     }
     for option, value in positive_values.items():
         if not _is_finite(value) or value <= 0.0:
             raise argparse.ArgumentTypeError(f"{option} must be positive")
     nonnegative_values = {
         "--torque-kd": args.torque_kd,
+        "--impedance-kd": args.impedance_kd,
         "--joint-limit-margin": args.joint_limit_margin,
         "--perception-latency": args.perception_latency,
         "--perception-jitter": args.perception_jitter,
@@ -340,6 +447,18 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         raise argparse.ArgumentTypeError(
             "--reacquire-confirm-frames must be at least 1"
         )
+    if args.policy_max_attempts < 1:
+        raise argparse.ArgumentTypeError("--policy-max-attempts must be at least 1")
+    if args.grasp_confirmation_frames < 1:
+        raise argparse.ArgumentTypeError(
+            "--grasp-confirmation-frames must be at least 1"
+        )
+    if args.grasp_lost_frames < 1:
+        raise argparse.ArgumentTypeError("--grasp-lost-frames must be at least 1")
+    if args.place_position is not None and not all(
+        _is_finite(value) for value in args.place_position
+    ):
+        raise argparse.ArgumentTypeError("--place-position must contain finite values")
     if (
         not _is_finite(args.perception_drop_probability)
         or not 0.0 <= args.perception_drop_probability <= 1.0
@@ -366,6 +485,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         mount_body=None
         if args.camera_mount_body is None
         else args.camera_mount_body.strip(),
+        role=args.camera_role,
         rgb_noise_std=float(args.rgb_noise_std),
         depth_noise_std=float(args.depth_noise_std),
         dropout_probability=float(args.camera_dropout_probability),
@@ -380,15 +500,30 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         standoff_m=standoff_m,
         control_hz=float(args.control_hz),
         actuator_mode=args.actuator_mode,
+        servo_mode=args.servo_mode,
         max_joint_accel=float(args.max_joint_accel),
         torque_kp=float(args.torque_kp),
         torque_kd=float(args.torque_kd),
+        impedance_kp=float(args.impedance_kp),
+        impedance_kd=float(args.impedance_kd),
         joint_limit_margin=float(args.joint_limit_margin),
         grasp_point=None if args.grasp_point is None else args.grasp_point.strip(),
         grasp_approach_m=float(args.grasp_approach),
         grasp_attach_distance_m=float(args.grasp_attach_distance),
         grasp_lift_m=float(args.grasp_lift),
         grasp_stage_tolerance_m=float(args.grasp_stage_tolerance),
+        place_position=None
+        if args.place_position is None
+        else tuple(float(value) for value in args.place_position),
+        policy_max_attempts=int(args.policy_max_attempts),
+        policy_close_timeout_s=float(args.policy_close_timeout),
+        policy_motion_timeout_s=float(args.policy_motion_timeout),
+        policy_max_normal_force_n=float(args.policy_max_force),
+        grasp_min_normal_force_n=float(args.grasp_min_force),
+        grasp_max_relative_slip_m=float(args.grasp_max_slip),
+        grasp_confirmation_frames=int(args.grasp_confirmation_frames),
+        grasp_lost_frames=int(args.grasp_lost_frames),
+        policy_place_tolerance_m=float(args.policy_place_tolerance),
     )
     depth = DepthConfig(
         backend=args.depth_backend,
@@ -431,6 +566,8 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
             add_table=not args.no_default_table,
             add_lights=not args.no_default_lights,
         ),
+        record_path=args.record_path,
+        stop_on_terminal=not args.no_stop_on_terminal,
     )
     validate_config(config)
     return config

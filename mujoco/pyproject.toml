@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mujoco-servo"
-version = "0.3.0"
-description = "Configurable MuJoCo RGB-D visual-servo simulator with replaceable robots and targets"
+version = "0.5.0"
+description = "MuJoCo IBVS/PBVS visual-servo and contact-manipulation learning platform"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
@@ -25,7 +26,7 @@ test = [
 dev = [
   "build>=1.2",
   "coverage[toml]>=7.6",
-  "ruff>=0.9",
+  "ruff==0.16.1",
 ]
 
 [project.scripts]
@@ -40,9 +41,13 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 extend-exclude = ["vendor"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF"]
 
 [tool.ruff.format]
 quote-style = "double"

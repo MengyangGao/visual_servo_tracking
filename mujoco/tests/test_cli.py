@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
-from ._bootstrap import SRC  # noqa: F401
-
-from mujoco_servo.cli import build_parser, config_from_args
 from mujoco_servo import cli as cli_module
+from mujoco_servo.cli import build_parser, config_from_args
 from mujoco_servo.config import (
     CameraConfig,
     ControllerConfig,
@@ -23,10 +21,12 @@ from mujoco_servo.config import (
     TargetPart,
     TargetSpec,
     load_robot_specs,
-    resolve_robot,
     resolve_config,
+    resolve_robot,
     validate_config,
 )
+
+SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def _write_robot_descriptor(
@@ -136,6 +136,8 @@ def test_cli_defaults_to_color_and_preserves_prompt() -> None:
     )
     assert config.detector == "color"
     assert config.controller.task == "standoff"
+    assert config.controller.standoff_m == pytest.approx(0.10)
+    assert ControllerConfig().standoff_m == pytest.approx(0.10)
     assert config.detection_timeout_s == 0.75
     assert config.perception_prompt == "red mug"
     assert config.robot_file is None
@@ -454,6 +456,29 @@ def test_cli_exposes_actuation_latency_and_environment_controls() -> None:
             "0.15",
             "--grasp-stage-tolerance",
             "0.02",
+            "--place-position",
+            "0.5",
+            "-0.1",
+            "0.25",
+            "--policy-max-attempts",
+            "3",
+            "--policy-close-timeout",
+            "3.0",
+            "--policy-motion-timeout",
+            "9.0",
+            "--policy-max-force",
+            "60.0",
+            "--grasp-min-force",
+            "0.4",
+            "--grasp-max-slip",
+            "0.002",
+            "--grasp-confirmation-frames",
+            "12",
+            "--grasp-lost-frames",
+            "18",
+            "--policy-place-tolerance",
+            "0.025",
+            "--no-stop-on-terminal",
             "--reacquire-confirm-frames",
             "4",
             "--perception-latency",
@@ -479,6 +504,17 @@ def test_cli_exposes_actuation_latency_and_environment_controls() -> None:
     assert config.controller.grasp_attach_distance_m == 0.07
     assert config.controller.grasp_lift_m == 0.15
     assert config.controller.grasp_stage_tolerance_m == 0.02
+    assert config.controller.place_position == (0.5, -0.1, 0.25)
+    assert config.controller.policy_max_attempts == 3
+    assert config.controller.policy_close_timeout_s == 3.0
+    assert config.controller.policy_motion_timeout_s == 9.0
+    assert config.controller.policy_max_normal_force_n == 60.0
+    assert config.controller.grasp_min_normal_force_n == 0.4
+    assert config.controller.grasp_max_relative_slip_m == 0.002
+    assert config.controller.grasp_confirmation_frames == 12
+    assert config.controller.grasp_lost_frames == 18
+    assert config.controller.policy_place_tolerance_m == 0.025
+    assert not config.stop_on_terminal
     assert config.reacquire_confirm_frames == 4
     assert config.perception_latency_s == 0.08
     assert config.perception_jitter_s == 0.01
@@ -558,6 +594,9 @@ def test_robot_descriptor_schema_version_and_grasp_metadata(tmp_path: Path) -> N
             "gripper_actuator_names": ["gripper"],
             "gripper_open_ctrl": [0.5],
             "gripper_closed_ctrl": [0.0],
+            "torque_gain_scale": [0.5, 0.75],
+            "impedance_gain_scale": [0.4, 0.6],
+            "preferred_standoff_direction": [0.0, 0.0, 2.0],
         }
     )
     path, _ = _write_robot_descriptor(
@@ -567,6 +606,9 @@ def test_robot_descriptor_schema_version_and_grasp_metadata(tmp_path: Path) -> N
     assert spec.schema_version == 1
     assert spec.grasp_attachment_body == "tool_body"
     assert spec.gripper_actuator_names == ("gripper",)
+    assert spec.torque_gain_scale == (0.5, 0.75)
+    assert spec.impedance_gain_scale == (0.4, 0.6)
+    assert spec.preferred_standoff_direction == (0.0, 0.0, 1.0)
     descriptor["schema_version"] = 2
     path, _ = _write_robot_descriptor(tmp_path, descriptor)
     with pytest.raises(ValueError, match="unsupported"):

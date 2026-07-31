@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
-
-from ._bootstrap import SRC  # noqa: F401
 
 from mujoco_servo import app as app_module
 from mujoco_servo.app import ManipulationState, TrackingState, VisualServoSimulation
 from mujoco_servo.clock import PhaseAccumulatorClock
 from mujoco_servo.config import CameraConfig, ControllerConfig, DemoConfig, DepthConfig
+from mujoco_servo.manipulation import GraspEvidence
 from mujoco_servo.perception import Detection
 from mujoco_servo.scene import frame_position
 
@@ -375,7 +374,6 @@ def test_sync_viewer_perception_is_camera_fps_throttled(monkeypatch) -> None:
     def render():
         nonlocal calls
         calls += 1
-        return None
 
     monkeypatch.setattr(app, "_render_camera_observation", render)
     assert (
@@ -540,7 +538,7 @@ def test_default_camera_frames_each_robot_workspace_and_custom_pose_is_preserved
     approach = np.asarray(ur_app.camera.lookat)[:2]
     assert np.isclose(np.linalg.norm(offset[:2]), 1.2)
     assert np.isclose(np.dot(offset[:2], approach), 0.0, atol=1e-9)
-    assert offset[1] <= 0.0
+    assert offset[1] >= 0.0
     assert np.isclose(offset[2], 0.7)
 
     custom = CameraConfig(position=(2.0, -2.0, 1.5), lookat=(0.0, 0.0, 0.2))
@@ -894,20 +892,14 @@ def test_configured_perception_latency_delays_availability(monkeypatch) -> None:
     assert summary.mean_perception_latency_ms >= 19.9
 
 
-@pytest.mark.parametrize(
-    ("robot", "target"),
-    [("panda", "cup"), ("ur5e", "box"), ("lite6", "box")],
-)
-def test_grasp_task_executes_and_lifts_for_all_builtin_robots(
-    robot: str, target: str
-) -> None:
+def test_real_contact_grasp_executes_and_lifts_without_weld() -> None:
     app = VisualServoSimulation(
         DemoConfig(
-            robot=robot,
-            target=target,
+            robot="panda",
+            target="grasp-cube",
             detector="oracle",
             trajectory="static",
-            steps=1200,
+            steps=1800,
             headless=True,
             viewer=False,
             realtime=False,
@@ -918,19 +910,57 @@ def test_grasp_task_executes_and_lifts_for_all_builtin_robots(
     assert app.target.dynamics == "physical"
     summary = app.run()
     assert summary.manipulation_state == ManipulationState.COMPLETE.value
+    assert summary.task_succeeded
     assert summary.grasped
     assert summary.target_lift_m >= 0.09
     assert summary.contact_steps > 0
+    assert summary.steps < 1800
+    assert summary.termination_reason == "grasp_succeeded"
+    assert app.scene.model.neq == 1  # Panda finger coupling only; no target weld.
+
+
+def test_completed_grasp_fails_if_verified_contact_is_lost() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            robot="panda",
+            target="grasp-cube",
+            detector="oracle",
+            trajectory="static",
+            steps=1,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            manual_control=False,
+            controller=ControllerConfig(task="grasp", grasp_lost_frames=2),
+        )
+    )
+    target = app.get_state().target_position
+    app._manipulation_state = ManipulationState.COMPLETE
+    app._grasped = True
+    app._grasp_lost_frames = 1
+    app._grasp_initial_target_z = float(target[2] - 0.10)
+    app._lift_goal_position = app.get_state().end_effector_position
+
+    class LostContactEvaluator:
+        def evaluate(self, _data) -> GraspEvidence:
+            return GraspEvidence((), 0.0, False, 0, 0.02, False)
+
+    app._grasp_evaluator = LostContactEvaluator()
+    app._manipulation_targets(target, target)
+
+    assert app._manipulation_state is ManipulationState.FAILED
+    assert not app._grasped
+    assert app._max_target_lift_m >= 0.099
 
 
 def test_panda_gripper_command_remains_closed_after_grasp() -> None:
     app = VisualServoSimulation(
         DemoConfig(
             robot="panda",
-            target="cup",
+            target="grasp-cube",
             detector="oracle",
             trajectory="static",
-            steps=600,
+            steps=1800,
             headless=True,
             viewer=False,
             realtime=False,
@@ -942,3 +972,96 @@ def test_panda_gripper_command_remains_closed_after_grasp() -> None:
     assert summary.grasped
     actuator_id = app.scene.model.actuator("actuator8").id
     assert app.scene.data.ctrl[actuator_id] == 0.0
+
+
+def test_reactive_pick_place_completes_with_physical_contact_and_release() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            robot="panda",
+            target="grasp-cube",
+            detector="oracle",
+            trajectory="static",
+            steps=3200,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            manual_control=False,
+            controller=ControllerConfig(task="pick-place", servo_mode="pbvs"),
+        )
+    )
+    summary = app.run()
+    assert summary.manipulation_state == ManipulationState.COMPLETE.value
+    assert summary.task_succeeded
+    assert not summary.grasped
+    assert summary.policy_name == "reactive-pick-place"
+    assert summary.policy_phase == "SUCCEEDED"
+    assert summary.policy_attempts == 0
+    assert summary.selected_grasp == "center"
+    assert summary.place_error_m is not None
+    assert summary.place_error_m <= 0.035
+    assert summary.contact_steps > 0
+    assert summary.steps < 3200
+    assert summary.termination_reason == "policy_succeeded"
+    assert summary.grasp_pose_source == "oracle-6d"
+    assert app._grasp_initial_target_z is None
+    assert summary.target_lift_m > 0.05
+    assert summary.grasp_normal_force_n > 0.0
+    assert summary.grasp_relative_slip_m > 0.0
+
+
+def test_pick_place_rejects_destination_outside_work_surface() -> None:
+    with pytest.raises(ValueError, match="work surface"):
+        VisualServoSimulation(
+            DemoConfig(
+                robot="panda",
+                target="grasp-cube",
+                detector="oracle",
+                headless=True,
+                viewer=False,
+                realtime=False,
+                controller=ControllerConfig(
+                    task="pick-place", place_position=(0.9, 0.9, 0.25)
+                ),
+            )
+        )
+
+
+def test_numerical_ik_reachability_uses_live_robot_limits() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            detector="oracle",
+            headless=True,
+            viewer=False,
+            realtime=False,
+        )
+    )
+    current = app.controller.frame_position(app.scene.data)
+    assert app.controller.is_position_reachable(app.scene.data, current)
+    assert not app.controller.is_position_reachable(
+        app.scene.data, np.array([5.0, 5.0, 5.0])
+    )
+    app.close()
+
+
+def test_contact_acceptance_thresholds_are_runtime_configuration() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            target="grasp-cube",
+            detector="oracle",
+            headless=True,
+            viewer=False,
+            realtime=False,
+            controller=ControllerConfig(
+                task="grasp",
+                grasp_min_normal_force_n=0.4,
+                grasp_max_relative_slip_m=0.002,
+                grasp_confirmation_frames=12,
+            ),
+        )
+    )
+    evaluator = app._grasp_evaluator
+    assert evaluator is not None
+    assert evaluator.min_normal_force_n == 0.4
+    assert evaluator.max_relative_slip_m == 0.002
+    assert evaluator.confirmation_frames == 12
+    app.close()

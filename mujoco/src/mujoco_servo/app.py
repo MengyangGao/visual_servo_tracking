@@ -10,16 +10,17 @@ import cv2
 import mujoco
 import numpy as np
 
-from .config import CameraConfig, DemoConfig, resolve_config
 from .clock import ControlTick, PhaseAccumulatorClock
+from .config import CameraConfig, DemoConfig, resolve_config
 from .control import (
     ResolvedRateController,
     ServoState,
     desired_ee_orientation,
-    desired_ee_position,
 )
+from .core.types import FeatureObservation, ServoMode
 from .depth import DepthBackend, build_depth_backend
-from .math_utils import vector_alignment_error
+from .manipulation import ContactGraspEvaluator, GraspEvidence
+from .math_utils import clamp_norm, tool_z_facing_rotation, vector_alignment_error
 from .perception import (
     CameraIntrinsics,
     CameraObservation,
@@ -27,18 +28,38 @@ from .perception import (
     PerceptionBackend,
     build_perception,
 )
+from .policy import (
+    CartesianPathValidator,
+    GraspPlanner,
+    GraspPlanningContext,
+    GripperCommand,
+    PolicyObservation,
+    PolicyPhase,
+    ReactivePickPlacePolicy,
+    ReactivePolicyConfig,
+    SafetyLimits,
+    SafetySupervisor,
+    WorkSurface,
+)
 from .scene import (
     WorldGraspPoint,
-    activate_grasp as activate_scene_grasp,
     body_position,
     build_scene,
-    deactivate_grasp as deactivate_scene_grasp,
     frame_position,
     grasp_point_world,
     set_target_position,
     site_position,
 )
+from .scene import (
+    activate_grasp as activate_scene_grasp,
+)
+from .scene import (
+    deactivate_grasp as deactivate_scene_grasp,
+)
+from .servo import VisualServoObjective
 from .targets import TargetMotion, base_position
+from .vision import align_rotation_to_reference, estimate_pose_6d
+from .viz import DashboardRenderer, DashboardTelemetry, VideoRecorder
 
 
 class TrackingState(str, Enum):
@@ -51,7 +72,14 @@ class ManipulationState(str, Enum):
     IDLE = "IDLE"
     PREGRASP = "PREGRASP"
     APPROACHING = "APPROACHING"
+    CLOSING = "CLOSING"
     LIFTING = "LIFTING"
+    TRANSFERRING = "TRANSFERRING"
+    PLACING = "PLACING"
+    RELEASING = "RELEASING"
+    RETREATING = "RETREATING"
+    VERIFYING = "VERIFYING"
+    RECOVERING = "RECOVERING"
     COMPLETE = "COMPLETE"
     FAILED = "FAILED"
 
@@ -109,8 +137,27 @@ class RunSummary:
     target_lift_m: float = 0.0
     steady_state_rms_error_m: float = 0.0
     steady_state_p95_error_m: float = 0.0
+    target_path_length_m: float = 0.0
+    end_effector_path_length_m: float = 0.0
+    tracking_path_ratio: float = 1.0
     perception_device: str = "none"
     depth_device: str = "none"
+    servo_mode: str = "pbvs"
+    final_image_error_px: float = 0.0
+    grasp_normal_force_n: float = 0.0
+    grasp_relative_slip_m: float = 0.0
+    policy_name: str = "none"
+    policy_phase: str | None = None
+    policy_attempts: int = 0
+    selected_grasp: str | None = None
+    place_position: tuple[float, float, float] | None = None
+    place_error_m: float | None = None
+    task_succeeded: bool = False
+    failure_reason: str | None = None
+    grasp_pose_source: str = "descriptor"
+    grasp_pose_quality: float = 0.0
+    rejected_grasps: tuple[str, ...] = ()
+    termination_reason: str = "step_budget"
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -140,6 +187,13 @@ class SimulationState:
     grasped: bool = False
     grasp_point_position: np.ndarray | None = None
     target_lift_m: float = 0.0
+    grasp_normal_force_n: float = 0.0
+    grasp_relative_slip_m: float = 0.0
+    policy_attempts: int = 0
+    policy_phase: str | None = None
+    place_error_m: float | None = None
+    grasp_pose_source: str = "descriptor"
+    grasp_pose_quality: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -173,12 +227,20 @@ class SimulationState:
                 else self.grasp_point_position.tolist()
             ),
             "target_lift_m": self.target_lift_m,
+            "grasp_normal_force_n": self.grasp_normal_force_n,
+            "grasp_relative_slip_m": self.grasp_relative_slip_m,
+            "policy_attempts": self.policy_attempts,
+            "policy_phase": self.policy_phase,
+            "place_error_m": self.place_error_m,
+            "grasp_pose_source": self.grasp_pose_source,
+            "grasp_pose_quality": self.grasp_pose_quality,
         }
 
 
 @dataclass(slots=True)
 class _StepOutcome:
     servo_state: ServoState
+    truth_target_position: np.ndarray
     error_m: float
     hold: bool
     oracle_truth: bool
@@ -198,7 +260,8 @@ class VisualServoSimulation:
         # to free bodies automatically when a manipulation task is selected.
         self.target = (
             replace(resolved.target, dynamics="physical")
-            if config.controller.task.strip().lower() in {"touch", "grasp"}
+            if config.controller.task.strip().lower()
+            in {"touch", "grasp", "pick-place"}
             else resolved.target
         )
         self._target_base_position = (
@@ -207,6 +270,14 @@ class VisualServoSimulation:
             or self.robot.default_target_position is None
             else np.array(self.robot.default_target_position, dtype=float).reshape(3)
         )
+        if self.target.dynamics == "physical":
+            # Spawn manipulation objects already supported by the work surface.
+            # Dropping them from a tracking-demo pose injects needless impact
+            # energy and makes grasp evaluation measure a transient accident.
+            support_z = 0.215 if config.environment.add_table else 0.0
+            self._target_base_position[2] = (
+                support_z + 0.5 * self.target.size[2] + 0.002
+            )
         self.camera = self._workspace_camera(
             config.camera, self._target_base_position, self.robot.base_position
         )
@@ -237,12 +308,30 @@ class VisualServoSimulation:
             config.controller,
         )
         self.controller.reset(self.scene.data)
+        self.visual_objective = VisualServoObjective(
+            mode=config.controller.servo_mode,
+            gain=config.controller.position_gain,
+            max_speed_mps=config.controller.max_ee_speed,
+            hybrid_switch_m=max(0.05, 1.5 * config.controller.standoff_m),
+        )
         self._clock = PhaseAccumulatorClock(
             float(self.scene.model.opt.timestep),
             float(config.controller.control_hz),
         )
         self.depth_backend: DepthBackend = build_depth_backend(config.depth)
         self._renderer = None
+        self._dashboard = DashboardRenderer()
+        self._recorder = (
+            None
+            if config.record_path is None
+            else VideoRecorder(
+                config.record_path, fps=config.camera_fps, frame_size=(960, 540)
+            )
+        )
+        self._last_servo_state: ServoState | None = None
+        self._last_camera_observation: CameraObservation | None = None
+        self._last_accepted_camera_observation: CameraObservation | None = None
+        self._detection_observations: dict[int, CameraObservation] = {}
         self._manual_target_offset = np.zeros(3, dtype=float)
         self._manual_target_velocity = np.zeros(3, dtype=float)
         self._manual_velocity_until = 0.0
@@ -289,6 +378,7 @@ class VisualServoSimulation:
         self._ever_tracked = self.detector_name == "oracle"
         self._last_observed_target: np.ndarray | None = None
         self._last_observed_time_s: float | None = None
+        self._estimated_target_velocity = np.zeros(3, dtype=float)
         self._reacquire_candidate: np.ndarray | None = None
         self._reacquire_count = 0
         self._reacquire_last_time_s: float | None = None
@@ -300,14 +390,90 @@ class VisualServoSimulation:
         self._lost_events = 0
         self._reacquire_events = 0
         self._completed_lost_duration_s = 0.0
-        manipulation_task = config.controller.task.strip().lower() in {"touch", "grasp"}
+        task = config.controller.task.strip().lower()
+        manipulation_task = task in {"touch", "grasp", "pick-place"}
         self._manipulation_state = (
             ManipulationState.PREGRASP if manipulation_task else ManipulationState.IDLE
         )
         self._grasped = False
+        self._grasp_evidence: GraspEvidence | None = None
+        self._peak_grasp_normal_force_n = 0.0
+        self._max_grasp_relative_slip_m = 0.0
+        self._grasp_lost_frames = 0
+        self._closing_frames = 0
+        self._grasp_evaluator: ContactGraspEvaluator | None = None
+        if (
+            task in {"grasp", "pick-place"}
+            and self.robot.grasp_attachment_body is not None
+            and len(self.robot.gripper_contact_bodies) >= 2
+        ):
+            self._grasp_evaluator = ContactGraspEvaluator(
+                self.scene.model,
+                target_body_name=self.scene.target_body_name,
+                gripper_body_names=self.robot.gripper_contact_bodies,
+                attachment_body_name=self.robot.grasp_attachment_body,
+                min_normal_force_n=config.controller.grasp_min_normal_force_n,
+                max_relative_slip_m=config.controller.grasp_max_relative_slip_m,
+                confirmation_frames=config.controller.grasp_confirmation_frames,
+            )
         self._contact_steps = 0
         self._grasp_initial_target_z: float | None = None
+        self._max_target_lift_m = 0.0
         self._lift_goal_position: np.ndarray | None = None
+        rotation_flat = np.empty(9, dtype=float)
+        mujoco.mju_quat2Mat(
+            rotation_flat, np.asarray(self.target.quat, dtype=float).reshape(4)
+        )
+        self._last_target_rotation = rotation_flat.reshape(3, 3).copy()
+        self._grasp_pose_source = "descriptor"
+        self._grasp_pose_quality = 0.0
+        self._work_surface = (
+            WorkSurface(
+                self.scene.work_surface_center_xy,
+                self.scene.work_surface_half_size_xy,
+                self.scene.support_z,
+            )
+            if self.scene.work_surface_center_xy is not None
+            and self.scene.work_surface_half_size_xy is not None
+            else None
+        )
+        bounds = self.robot.detection_bounds or (
+            (-1.25, -1.25, 0.0),
+            (1.25, 1.25, 1.90),
+        )
+        workspace_min = np.asarray(bounds[0], dtype=float).copy()
+        workspace_max = np.asarray(bounds[1], dtype=float).copy()
+        workspace_min[2] = max(workspace_min[2], self.scene.support_z + 0.005)
+        self._path_validator = CartesianPathValidator(
+            workspace_min,
+            workspace_max,
+            support_z=self.scene.support_z,
+        )
+        self._place_position = self._resolve_place_position()
+        self._grasp_planner = GraspPlanner()
+        self._pick_place_policy: ReactivePickPlacePolicy | None = None
+        self._safety_supervisor: SafetySupervisor | None = None
+        self._gripper_commanded_closed = False
+        if task == "pick-place":
+            self._pick_place_policy = ReactivePickPlacePolicy(
+                ReactivePolicyConfig(
+                    stage_tolerance_m=config.controller.grasp_stage_tolerance_m,
+                    lift_distance_m=config.controller.grasp_lift_m,
+                    max_attempts=config.controller.policy_max_attempts,
+                    close_timeout_s=config.controller.policy_close_timeout_s,
+                    motion_timeout_s=config.controller.policy_motion_timeout_s,
+                    place_tolerance_m=config.controller.policy_place_tolerance_m,
+                ),
+                self._place_position,
+            )
+            self._safety_supervisor = SafetySupervisor(
+                SafetyLimits(
+                    workspace_min=tuple(float(value) for value in workspace_min),
+                    workspace_max=tuple(float(value) for value in workspace_max),
+                    max_normal_force_n=config.controller.policy_max_normal_force_n,
+                ),
+                path_is_valid=self._cartesian_path_is_valid,
+            )
         self._initial_data = self._snapshot_data()
         if self._tracking_state is TrackingState.LOST:
             self.controller.begin_hold(self.scene.data)
@@ -322,9 +488,15 @@ class VisualServoSimulation:
         defaults = CameraConfig()
         if (
             getattr(camera, "mount_body", None) is not None
-            or camera.position != defaults.position
-            or camera.lookat != defaults.lookat
+            and camera.position == defaults.position
+            and camera.lookat == defaults.lookat
         ):
+            return replace(
+                camera,
+                position=(0.0, 0.0, 0.065),
+                lookat=(0.0, 0.0, 0.35),
+            )
+        if camera.position != defaults.position or camera.lookat != defaults.lookat:
             return camera
         target = np.asarray(target_position, dtype=float).reshape(3)
         # Look across (rather than along) the base-to-target approach line so
@@ -334,7 +506,10 @@ class VisualServoSimulation:
         radial_norm = float(np.linalg.norm(radial))
         radial = radial / radial_norm if radial_norm > 1e-9 else np.array([1.0, 0.0])
         side = np.array([radial[1], -radial[0]], dtype=float)
-        if side[1] > 0.0:
+        # Prefer the positive-Y side of the table.  For the default Panda
+        # workspace this keeps the wrist behind the target in the camera view,
+        # which avoids losing a target at short standoff distances.
+        if side[1] < 0.0:
             side = -side
         position = target + np.array([1.2 * side[0], 1.2 * side[1], 0.7], dtype=float)
         return replace(camera, position=tuple(position), lookat=tuple(target))
@@ -410,7 +585,30 @@ class VisualServoSimulation:
             grasp_point_position=None
             if world_grasp is None
             else world_grasp.position.copy(),
-            target_lift_m=self._target_lift(target),
+            target_lift_m=max(self._target_lift(target), self._max_target_lift_m),
+            grasp_normal_force_n=(
+                0.0
+                if self._grasp_evidence is None
+                else self._grasp_evidence.normal_force_n
+            ),
+            grasp_relative_slip_m=(
+                0.0
+                if self._grasp_evidence is None
+                else self._grasp_evidence.relative_slip_m
+            ),
+            policy_attempts=(
+                0
+                if self._pick_place_policy is None
+                else self._pick_place_policy.attempts
+            ),
+            policy_phase=(
+                None
+                if self._pick_place_policy is None
+                else self._pick_place_policy.phase.value
+            ),
+            place_error_m=self._place_error(target),
+            grasp_pose_source=self._grasp_pose_source,
+            grasp_pose_quality=self._grasp_pose_quality,
         )
 
     @property
@@ -452,6 +650,9 @@ class VisualServoSimulation:
         self._last_camera_sim_time = -1.0e9
         self._next_camera_sim_time = float(data.time)
         self._last_detection = None
+        self._last_camera_observation = None
+        self._last_accepted_camera_observation = None
+        self._detection_observations.clear()
         self._last_detection_wall_time = None
         self._last_detection_sim_time = None
         self._last_detection_available_wall_time = None
@@ -479,6 +680,7 @@ class VisualServoSimulation:
         self._ever_tracked = self.detector_name == "oracle"
         self._last_observed_target = None
         self._last_observed_time_s = None
+        self._estimated_target_velocity.fill(0.0)
         self._reacquire_candidate = None
         self._reacquire_count = 0
         self._reacquire_last_time_s = None
@@ -490,13 +692,32 @@ class VisualServoSimulation:
         self._completed_lost_duration_s = 0.0
         self._manipulation_state = (
             ManipulationState.PREGRASP
-            if self.config.controller.task.strip().lower() in {"touch", "grasp"}
+            if self.config.controller.task.strip().lower()
+            in {"touch", "grasp", "pick-place"}
             else ManipulationState.IDLE
         )
         self._grasped = False
+        self._grasp_evidence = None
+        self._peak_grasp_normal_force_n = 0.0
+        self._max_grasp_relative_slip_m = 0.0
+        self._grasp_lost_frames = 0
+        self._closing_frames = 0
+        if self._grasp_evaluator is not None:
+            self._grasp_evaluator.reset()
         self._contact_steps = 0
         self._grasp_initial_target_z = None
+        self._max_target_lift_m = 0.0
         self._lift_goal_position = None
+        self._gripper_commanded_closed = False
+        if self._pick_place_policy is not None:
+            self._pick_place_policy.reset(float(data.time))
+        rotation_flat = np.empty(9, dtype=float)
+        mujoco.mju_quat2Mat(
+            rotation_flat, np.asarray(self.target.quat, dtype=float).reshape(4)
+        )
+        self._last_target_rotation = rotation_flat.reshape(3, 3).copy()
+        self._grasp_pose_source = "descriptor"
+        self._grasp_pose_quality = 0.0
         deactivate_scene_grasp(self.scene)
         reset_backend = getattr(self.perception, "reset", None)
         if callable(reset_backend):
@@ -521,8 +742,11 @@ class VisualServoSimulation:
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
+        if self._recorder is not None:
+            self._recorder.close()
+            self._recorder = None
 
-    def __enter__(self) -> "VisualServoSimulation":
+    def __enter__(self) -> VisualServoSimulation:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
@@ -556,7 +780,7 @@ class VisualServoSimulation:
     def activate_grasp(
         self, name: str | None = None, *, max_distance_m: float | None = None
     ) -> WorldGraspPoint:
-        """Attach a nearby physical target and latch the robot gripper closed."""
+        """Close a nearby gripper; contact evidence, not a weld, confirms grasping."""
         selected = self.config.controller.grasp_point if name is None else name
         distance = (
             self.config.controller.grasp_attach_distance_m
@@ -565,20 +789,32 @@ class VisualServoSimulation:
         )
         point = activate_scene_grasp(self.scene, selected, max_distance_m=distance)
         self.controller.set_gripper_closed(True)
-        self._grasped = True
-        if self._grasp_initial_target_z is None:
-            target = site_position(
-                self.scene.model, self.scene.data, self.scene.target_site_name
-            )
-            self._grasp_initial_target_z = float(target[2])
+        self._gripper_commanded_closed = True
+        self._grasped = False
+        target = site_position(
+            self.scene.model, self.scene.data, self.scene.target_site_name
+        )
+        self._grasp_initial_target_z = float(target[2])
         return point
 
     def release_grasp(self) -> None:
         """Release the target and restore the configured open-gripper control."""
+        target = site_position(
+            self.scene.model, self.scene.data, self.scene.target_site_name
+        )
+        self._max_target_lift_m = max(
+            self._max_target_lift_m, self._target_lift(target)
+        )
         deactivate_scene_grasp(self.scene)
         self.controller.set_gripper_closed(False)
+        self._gripper_commanded_closed = False
         self._grasped = False
+        self._grasp_evidence = None
+        self._grasp_lost_frames = 0
+        if self._grasp_evaluator is not None:
+            self._grasp_evaluator.reset()
         self._lift_goal_position = None
+        self._grasp_initial_target_z = None
 
     def run(self) -> RunSummary:
         viewer = None
@@ -726,6 +962,8 @@ class VisualServoSimulation:
     def _run_loop(self, viewer) -> RunSummary:
         errors: list[float] = []
         error_times: list[float] = []
+        truth_target_positions: list[np.ndarray] = []
+        end_effector_positions: list[np.ndarray] = []
         hold_steps = 0
         oracle_truth_steps = 0
         truth_fallback_steps = 0
@@ -742,8 +980,11 @@ class VisualServoSimulation:
         dropped_start = self._dropped_camera_frames
         latency_start = len(self._perception_latencies_s)
         contact_steps_start = self._contact_steps
+        termination_reason = "step_budget"
+        terminal_steps = 0
         for _ in range(self.config.steps):
             if viewer is not None and not viewer.is_running():
+                termination_reason = "viewer_closed"
                 break
             tick = self._clock.next_tick()
             outcome = self._execute_control_step(viewer, tick, self._step_index)
@@ -751,6 +992,8 @@ class VisualServoSimulation:
             last_state = outcome.servo_state
             errors.append(outcome.error_m)
             error_times.append(float(last_state.time_s) - sim_start)
+            truth_target_positions.append(outcome.truth_target_position.copy())
+            end_effector_positions.append(last_state.ee_position.copy())
             hold_steps += int(outcome.hold)
             oracle_truth_steps += int(outcome.oracle_truth)
             perception_updates += outcome.perception_updates
@@ -763,6 +1006,34 @@ class VisualServoSimulation:
                 viewer.sync()
             if self.config.realtime:
                 self._sleep_to_simulation_time(sim_start, wall_start)
+            policy = self._pick_place_policy
+            task = self.config.controller.task.strip().lower()
+            manipulation_terminal = (
+                policy is None
+                and task in {"touch", "grasp"}
+                and self._manipulation_state
+                in {ManipulationState.COMPLETE, ManipulationState.FAILED}
+            )
+            if self.config.stop_on_terminal and (
+                (policy is not None and (policy.succeeded or policy.failed))
+                or manipulation_terminal
+            ):
+                terminal_steps += 1
+                if terminal_steps >= self.config.terminal_settle_steps:
+                    if policy is not None:
+                        termination_reason = (
+                            "policy_succeeded" if policy.succeeded else "policy_failed"
+                        )
+                    else:
+                        result = (
+                            "succeeded"
+                            if self._manipulation_state is ManipulationState.COMPLETE
+                            else "failed"
+                        )
+                        termination_reason = f"{task}_{result}"
+                    break
+            else:
+                terminal_steps = 0
 
         completed_steps = len(errors)
         metric_errors = errors
@@ -777,15 +1048,12 @@ class VisualServoSimulation:
         if last_state is not None and self.config.controller.task.strip().lower() in {
             "touch",
             "grasp",
+            "pick-place",
         }:
             final_desired = last_state.desired_position
         else:
-            final_desired = desired_ee_position(
-                self.config.controller.task,
-                final_snapshot.target_position,
-                final_snapshot.end_effector_position,
-                self.config.controller,
-                self.robot.base_position,
+            final_desired = self.controller.desired_position(
+                data, final_snapshot.target_position
             )
         final_error = float(
             np.linalg.norm(final_desired - final_snapshot.end_effector_position)
@@ -795,6 +1063,15 @@ class VisualServoSimulation:
         metric_array = np.asarray(metric_errors, dtype=float)
         steady_start = len(metric_array) // 2
         steady_array = metric_array[steady_start:]
+        target_path_length = self._path_length(truth_target_positions[steady_start:])
+        end_effector_path_length = self._path_length(
+            end_effector_positions[steady_start:]
+        )
+        tracking_path_ratio = (
+            end_effector_path_length / target_path_length
+            if target_path_length > 1e-6
+            else 1.0
+        )
         settling_time = self._settling_time(errors, error_times)
         run_latencies = self._perception_latencies_s[latency_start:]
         detected_position = final_snapshot.detected_position
@@ -871,13 +1148,72 @@ class VisualServoSimulation:
             manipulation_state=self._manipulation_state.value,
             contact_steps=self._contact_steps - contact_steps_start,
             grasped=self._grasped,
-            target_lift_m=final_snapshot.target_lift_m,
+            target_lift_m=max(final_snapshot.target_lift_m, self._max_target_lift_m),
             steady_state_rms_error_m=float(
                 np.sqrt(np.mean(steady_array * steady_array))
             ),
             steady_state_p95_error_m=float(np.percentile(steady_array, 95.0)),
+            target_path_length_m=target_path_length,
+            end_effector_path_length_m=end_effector_path_length,
+            tracking_path_ratio=tracking_path_ratio,
             perception_device=self._perception_device_name(),
             depth_device=self._depth_device_name(),
+            servo_mode=(
+                self.config.controller.servo_mode
+                if last_state is None
+                else last_state.servo_mode
+            ),
+            final_image_error_px=(
+                0.0 if last_state is None else last_state.image_error_px
+            ),
+            grasp_normal_force_n=(self._peak_grasp_normal_force_n),
+            grasp_relative_slip_m=(self._max_grasp_relative_slip_m),
+            policy_name=(
+                "reactive-pick-place" if self._pick_place_policy is not None else "none"
+            ),
+            policy_phase=(
+                None
+                if self._pick_place_policy is None
+                else self._pick_place_policy.phase.value
+            ),
+            policy_attempts=(
+                0
+                if self._pick_place_policy is None
+                else self._pick_place_policy.attempts
+            ),
+            selected_grasp=(
+                None
+                if self._pick_place_policy is None
+                or self._pick_place_policy.selected_grasp is None
+                else self._pick_place_policy.selected_grasp.name
+            ),
+            place_position=(
+                None
+                if self._pick_place_policy is None
+                else tuple(float(value) for value in self._place_position)
+            ),
+            place_error_m=self._place_error(final_snapshot.target_position),
+            task_succeeded=self._task_succeeded(final_snapshot, final_error),
+            failure_reason=(
+                None
+                if self._pick_place_policy is None
+                else self._pick_place_policy.failure_reason
+                or (
+                    "placement tolerance was not met"
+                    if self._pick_place_policy.succeeded
+                    and final_snapshot.place_error_m is not None
+                    and final_snapshot.place_error_m
+                    > self.config.controller.policy_place_tolerance_m
+                    else None
+                )
+            ),
+            grasp_pose_source=self._grasp_pose_source,
+            grasp_pose_quality=self._grasp_pose_quality,
+            rejected_grasps=tuple(
+                f"{item.name}: {item.reason}"
+                for item in self._grasp_planner.last_rejections
+            ),
+            termination_reason=termination_reason,
         )
 
     def _perception_device_name(self) -> str:
@@ -928,10 +1264,27 @@ class VisualServoSimulation:
         hold_command = (
             not oracle_truth and self._tracking_state is not TrackingState.TRACKING
         )
+        occlusion_bridge = (
+            self._manipulation_state
+            in {
+                ManipulationState.CLOSING,
+                ManipulationState.LIFTING,
+                ManipulationState.TRANSFERRING,
+                ManipulationState.PLACING,
+                ManipulationState.RELEASING,
+                ManipulationState.RETREATING,
+                ManipulationState.VERIFYING,
+                ManipulationState.RECOVERING,
+            }
+            and self._last_observed_target is not None
+        )
         if oracle_truth:
             command_target = target_pos
-        elif not hold_command and self._last_observed_target is not None:
-            command_target = self._last_observed_target
+        elif (
+            not hold_command or occlusion_bridge
+        ) and self._last_observed_target is not None:
+            command_target = self._predicted_observed_target(time_s)
+            hold_command = False
         else:
             command_target = None
             hold_command = True
@@ -946,19 +1299,72 @@ class VisualServoSimulation:
             )
         else:
             assert command_target is not None
-            servo_state = self.controller.step(
-                data, command_target, time_s, step_index, tick.duration_s
+            desired_for_servo = self.controller.desired_position(data, command_target)
+            feature = self._latest_target_feature()
+            objective = (
+                self.visual_objective.compute(
+                    ee_position_world=frame_position(
+                        model,
+                        data,
+                        self.scene.ee_frame_type,
+                        self.scene.ee_frame_name,
+                        self.scene.ee_frame_offset,
+                    ),
+                    desired_position_world=desired_for_servo,
+                    camera=self._last_camera_observation,
+                    target_feature=feature,
+                    camera_role=self.camera.role,
+                    desired_feature_depth_m=self._desired_feature_depth(),
+                )
+                if (
+                    self.visual_objective.mode is ServoMode.PBVS
+                    or (
+                        self._last_camera_observation is not None
+                        and feature is not None
+                    )
+                )
+                else VisualServoObjective(
+                    mode=ServoMode.PBVS,
+                    gain=self.config.controller.position_gain,
+                    max_speed_mps=self.config.controller.max_ee_speed,
+                ).compute(
+                    ee_position_world=frame_position(
+                        model,
+                        data,
+                        self.scene.ee_frame_type,
+                        self.scene.ee_frame_name,
+                        self.scene.ee_frame_offset,
+                    ),
+                    desired_position_world=desired_for_servo,
+                )
             )
+            servo_state = self.controller.step(
+                data,
+                command_target,
+                time_s,
+                step_index,
+                tick.duration_s,
+                cartesian_velocity_world=self._tracking_velocity_command(
+                    objective.linear_velocity_world
+                ),
+                desired_rotation_world=self._control_orientation(
+                    command_target,
+                    frame_position(
+                        model,
+                        data,
+                        self.scene.ee_frame_type,
+                        self.scene.ee_frame_name,
+                        self.scene.ee_frame_offset,
+                    ),
+                ),
+            )
+            servo_state.servo_mode = objective.mode.value
+            servo_state.image_error_px = objective.image_error_px
+        self._last_servo_state = servo_state
         eval_desired = (
             manipulation_goal
             if manipulation_goal is not None
-            else desired_ee_position(
-                self.config.controller.task,
-                target_pos,
-                servo_state.ee_position,
-                self.config.controller,
-                self.robot.base_position,
-            )
+            else self.controller.desired_position(data, target_pos)
         )
         error_m = float(np.linalg.norm(eval_desired - servo_state.ee_position))
 
@@ -973,12 +1379,72 @@ class VisualServoSimulation:
             mujoco.mj_step(model, data)
         return _StepOutcome(
             servo_state=servo_state,
+            truth_target_position=target_pos.copy(),
             error_m=error_m,
             hold=hold_command,
             oracle_truth=oracle_truth,
             perception_updates=perception_updates,
             rejected_detections=rejected_detections,
         )
+
+    @staticmethod
+    def _path_length(positions: list[np.ndarray]) -> float:
+        if len(positions) < 2:
+            return 0.0
+        points = np.asarray(positions, dtype=float)
+        return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+
+    def _latest_target_feature(self) -> FeatureObservation | None:
+        detection = self._last_accepted_detection
+        observation = self._last_camera_observation
+        if detection is None or observation is None or detection.centroid_px is None:
+            return None
+        pixel = np.asarray(detection.centroid_px, dtype=float).reshape(2)
+        x = int(np.clip(round(float(pixel[0])), 0, observation.intrinsics.width - 1))
+        y = int(np.clip(round(float(pixel[1])), 0, observation.intrinsics.height - 1))
+        x0, x1 = max(0, x - 2), min(observation.intrinsics.width, x + 3)
+        y0, y1 = max(0, y - 2), min(observation.intrinsics.height, y + 3)
+        window = np.asarray(observation.depth_m[y0:y1, x0:x1], dtype=float)
+        valid = window[np.isfinite(window) & (window > 0.0)]
+        if valid.size == 0:
+            return None
+        return FeatureObservation(
+            pixel=pixel,
+            depth_m=float(np.median(valid)),
+            confidence=float(np.clip(detection.score, 0.0, 1.0)),
+        )
+
+    def _desired_feature_depth(self) -> float:
+        task = self.config.controller.task.strip().lower()
+        if task in {"standoff", "front-standoff"}:
+            return max(0.03, float(self.config.controller.standoff_m))
+        return max(0.03, float(self.target.radius))
+
+    def _control_orientation(
+        self, command_target: np.ndarray, ee_position: np.ndarray
+    ) -> np.ndarray | None:
+        if self.config.controller.task.strip().lower() in {
+            "touch",
+            "grasp",
+            "pick-place",
+        }:
+            if (
+                self.config.controller.task.strip().lower() == "pick-place"
+                and self._pick_place_policy is not None
+                and self._pick_place_policy.selected_grasp is not None
+            ):
+                return tool_z_facing_rotation(
+                    self._pick_place_policy.selected_grasp.approach
+                )
+            point = self._safe_grasp_point()
+            if point is not None:
+                return tool_z_facing_rotation(point.approach)
+        if self.camera.role == "eye-in-hand":
+            return tool_z_facing_rotation(
+                np.asarray(command_target, dtype=float).reshape(3)
+                - np.asarray(ee_position, dtype=float).reshape(3)
+            )
+        return None
 
     def _manipulation_targets(
         self,
@@ -989,6 +1455,8 @@ class VisualServoSimulation:
         task = self.config.controller.task.strip().lower()
         observed = np.asarray(observed_target, dtype=float).reshape(3)
         truth = np.asarray(truth_target, dtype=float).reshape(3)
+        if task == "pick-place":
+            return self._pick_place_targets(observed, truth)
         if task not in {"touch", "grasp"}:
             return observed, None
 
@@ -1010,6 +1478,10 @@ class VisualServoSimulation:
             self.scene.ee_frame_name,
             self.scene.ee_frame_offset,
         )
+        if self._grasp_initial_target_z is not None:
+            self._max_target_lift_m = max(
+                self._max_target_lift_m, self._target_lift(truth)
+            )
         in_contact = self._target_robot_contact()
         if in_contact:
             self._contact_steps += 1
@@ -1028,28 +1500,59 @@ class VisualServoSimulation:
                 task == "grasp"
                 and distance <= self.config.controller.grasp_attach_distance_m
             ):
+                if self._grasp_evaluator is None:
+                    self._manipulation_state = ManipulationState.FAILED
+                    return ee.copy(), ee.copy()
                 try:
                     self.activate_grasp()
                 except (KeyError, RuntimeError, ValueError):
                     self._manipulation_state = ManipulationState.FAILED
                 else:
-                    self._manipulation_state = ManipulationState.LIFTING
-                    self._lift_goal_position = ee + np.array(
-                        [0.0, 0.0, self.config.controller.grasp_lift_m], dtype=float
-                    )
+                    self._manipulation_state = ManipulationState.CLOSING
 
-        if self._manipulation_state is ManipulationState.LIFTING:
-            assert self._lift_goal_position is not None
-            current_target = site_position(
-                self.scene.model, self.scene.data, self.scene.target_site_name
-            )
-            if (
-                self._target_lift(current_target)
-                >= 0.8 * self.config.controller.grasp_lift_m
-            ):
-                self._manipulation_state = ManipulationState.COMPLETE
+        if self._manipulation_state is ManipulationState.CLOSING:
+            assert self._grasp_evaluator is not None
+            self._closing_frames += 1
+            self._grasp_evidence = self._grasp_evaluator.evaluate(self.scene.data)
+            self._record_grasp_evidence()
+            if self._grasp_evidence.grasped:
+                self._grasped = True
+                self._manipulation_state = ManipulationState.LIFTING
+                self._lift_goal_position = ee + np.array(
+                    [0.0, 0.0, self.config.controller.grasp_lift_m], dtype=float
+                )
+            elif self._closing_frames >= 240:
+                self._manipulation_state = ManipulationState.FAILED
+                return ee.copy(), ee.copy()
 
         if self._manipulation_state in {
+            ManipulationState.LIFTING,
+            ManipulationState.COMPLETE,
+        }:
+            assert self._lift_goal_position is not None
+            assert self._grasp_evaluator is not None
+            self._grasp_evidence = self._grasp_evaluator.evaluate(self.scene.data)
+            self._record_grasp_evidence()
+            contact_stable = self._grasp_evidence.stable_frames > 0
+            self._grasp_lost_frames = (
+                0 if contact_stable else self._grasp_lost_frames + 1
+            )
+            if self._grasp_lost_frames >= self.config.controller.grasp_lost_frames:
+                self._grasped = False
+                self._manipulation_state = ManipulationState.FAILED
+                return ee.copy(), ee.copy()
+            if self._manipulation_state is ManipulationState.LIFTING:
+                current_target = site_position(
+                    self.scene.model, self.scene.data, self.scene.target_site_name
+                )
+                if (
+                    self._target_lift(current_target)
+                    >= 0.8 * self.config.controller.grasp_lift_m
+                ):
+                    self._manipulation_state = ManipulationState.COMPLETE
+
+        if self._manipulation_state in {
+            ManipulationState.CLOSING,
             ManipulationState.LIFTING,
             ManipulationState.COMPLETE,
         }:
@@ -1057,9 +1560,253 @@ class VisualServoSimulation:
                 return self._lift_goal_position.copy(), self._lift_goal_position.copy()
         if self._manipulation_state is ManipulationState.APPROACHING:
             return observed_point, point.position.copy()
+        if self._manipulation_state is ManipulationState.CLOSING:
+            return observed_point, point.position.copy()
         if self._manipulation_state is ManipulationState.FAILED:
             return ee.copy(), ee.copy()
         return pregrasp_observed, pregrasp_truth
+
+    def _pick_place_targets(
+        self, observed_target: np.ndarray, truth_target: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        policy = self._pick_place_policy
+        supervisor = self._safety_supervisor
+        if policy is None or supervisor is None or self._grasp_evaluator is None:
+            self._manipulation_state = ManipulationState.FAILED
+            ee = self._current_ee_position()
+            return ee, ee
+
+        ee = self._current_ee_position()
+        if self._grasp_initial_target_z is not None:
+            self._max_target_lift_m = max(
+                self._max_target_lift_m, self._target_lift(truth_target)
+            )
+        if self._target_robot_contact():
+            self._contact_steps += 1
+        if self._gripper_commanded_closed:
+            self._grasp_evidence = self._grasp_evaluator.evaluate(self.scene.data)
+            self._record_grasp_evidence()
+            if self._grasp_evidence.grasped:
+                self._grasped = True
+                self._grasp_lost_frames = 0
+            elif self._grasped:
+                if self._grasp_evidence.stable_frames > 0:
+                    self._grasp_lost_frames = 0
+                else:
+                    self._grasp_lost_frames += 1
+                if self._grasp_lost_frames >= self.config.controller.grasp_lost_frames:
+                    self._grasped = False
+
+        if policy.selected_grasp is None:
+            try:
+                camera_id = mujoco.mj_name2id(
+                    self.scene.model,
+                    mujoco.mjtObj.mjOBJ_CAMERA,
+                    self.scene.camera_name,
+                )
+                points = self._observed_grasp_points(observed_target)
+                candidate = self._grasp_planner.select(
+                    points,
+                    GraspPlanningContext(
+                        ee_position=ee,
+                        camera_position=np.asarray(
+                            self.scene.data.cam_xpos[camera_id], dtype=float
+                        ),
+                        support_z=self.scene.support_z,
+                        approach_distance_m=self.config.controller.grasp_approach_m,
+                        max_reach_m=1.25,
+                        max_gripper_width_m=self.robot.max_gripper_width_m,
+                        excluded_names=policy.failed_grasps,
+                        reachable=lambda point: self.controller.is_position_reachable(
+                            self.scene.data,
+                            point,
+                            tolerance_m=self.config.controller.grasp_stage_tolerance_m,
+                        ),
+                        path_is_valid=self._cartesian_path_is_valid,
+                    ),
+                )
+                policy.set_grasp(candidate, observed_target)
+            except (KeyError, RuntimeError, ValueError) as exc:
+                policy.abort(float(self.scene.data.time), str(exc))
+
+        evidence = self._grasp_evidence
+        observation = PolicyObservation(
+            time_s=float(self.scene.data.time),
+            ee_position=ee,
+            target_position=np.asarray(observed_target, dtype=float).reshape(3),
+            tracking_valid=self._tracking_state is TrackingState.TRACKING,
+            grasped=self._grasped,
+            contact_stable_frames=0 if evidence is None else evidence.stable_frames,
+            normal_force_n=0.0 if evidence is None else evidence.normal_force_n,
+            place_error_m=(
+                self._place_error(observed_target)
+                if self._tracking_state is TrackingState.TRACKING
+                else None
+            ),
+        )
+        command = supervisor.supervise(policy.step(observation), observation)
+        if (
+            command.phase is PolicyPhase.RECOVER
+            and policy.phase is not PolicyPhase.RECOVER
+        ):
+            command = policy.request_recovery(
+                ee, float(self.scene.data.time), command.reason or "safety recovery"
+            )
+
+        if (
+            command.gripper is GripperCommand.CLOSE
+            and not self._gripper_commanded_closed
+        ):
+            try:
+                selected = policy.selected_grasp
+                self.activate_grasp(None if selected is None else selected.name)
+            except (KeyError, RuntimeError, ValueError) as exc:
+                policy.abort(float(self.scene.data.time), str(exc))
+                command = policy.step(observation)
+        elif command.gripper is GripperCommand.OPEN and self._gripper_commanded_closed:
+            self.release_grasp()
+
+        self._manipulation_state = self._policy_manipulation_state(policy.phase)
+        goal = np.asarray(command.goal_position, dtype=float).reshape(3)
+        return goal.copy(), goal.copy()
+
+    def _current_ee_position(self) -> np.ndarray:
+        return frame_position(
+            self.scene.model,
+            self.scene.data,
+            self.scene.ee_frame_type,
+            self.scene.ee_frame_name,
+            self.scene.ee_frame_offset,
+        )
+
+    def _record_grasp_evidence(self) -> None:
+        evidence = self._grasp_evidence
+        if evidence is None:
+            return
+        self._peak_grasp_normal_force_n = max(
+            self._peak_grasp_normal_force_n, evidence.normal_force_n
+        )
+        self._max_grasp_relative_slip_m = max(
+            self._max_grasp_relative_slip_m, evidence.relative_slip_m
+        )
+
+    def _observed_grasp_points(
+        self, observed_target: np.ndarray
+    ) -> tuple[WorldGraspPoint, ...]:
+        """Lift descriptor-local grasp geometry into the observed 6D pose."""
+        centre = np.asarray(observed_target, dtype=float).reshape(3)
+        rotation = self._estimate_target_rotation()
+        points = []
+        for point in self.target.grasp_points:
+            points.append(
+                WorldGraspPoint(
+                    point.name,
+                    centre + rotation @ np.asarray(point.position, dtype=float),
+                    rotation @ np.asarray(point.approach, dtype=float),
+                    point.width_m,
+                )
+            )
+        return tuple(points)
+
+    def _estimate_target_rotation(self) -> np.ndarray:
+        if self.detector_name == "oracle":
+            body_id = mujoco.mj_name2id(
+                self.scene.model,
+                mujoco.mjtObj.mjOBJ_BODY,
+                self.scene.target_body_name,
+            )
+            if body_id >= 0:
+                rotation = np.asarray(
+                    self.scene.data.xmat[body_id], dtype=float
+                ).reshape(3, 3)
+                self._last_target_rotation = rotation.copy()
+                self._grasp_pose_source = "oracle-6d"
+                self._grasp_pose_quality = 1.0
+                return rotation.copy()
+        detection = self._last_accepted_detection
+        observation = self._last_accepted_camera_observation
+        if (
+            detection is not None
+            and detection.mask is not None
+            and observation is not None
+            and observation.depth_metric
+        ):
+            pose = estimate_pose_6d(observation, detection.mask)
+            if pose is not None and pose.quality >= 0.20:
+                rotation = align_rotation_to_reference(
+                    pose.rotation_world, self._last_target_rotation
+                )
+                self._last_target_rotation = rotation.copy()
+                self._grasp_pose_source = "visual-depth-6d"
+                self._grasp_pose_quality = float(pose.quality)
+                return rotation
+        self._grasp_pose_source = "descriptor-fallback"
+        self._grasp_pose_quality = 0.0
+        return self._last_target_rotation.copy()
+
+    def _cartesian_path_is_valid(self, start: np.ndarray, end: np.ndarray) -> bool:
+        return self._path_validator.check(start, end).valid
+
+    @staticmethod
+    def _policy_manipulation_state(phase: PolicyPhase) -> ManipulationState:
+        return {
+            PolicyPhase.ACQUIRE: ManipulationState.PREGRASP,
+            PolicyPhase.PREGRASP: ManipulationState.PREGRASP,
+            PolicyPhase.APPROACH: ManipulationState.APPROACHING,
+            PolicyPhase.CLOSE: ManipulationState.CLOSING,
+            PolicyPhase.VERIFY: ManipulationState.CLOSING,
+            PolicyPhase.LIFT: ManipulationState.LIFTING,
+            PolicyPhase.TRANSFER: ManipulationState.TRANSFERRING,
+            PolicyPhase.PLACE: ManipulationState.PLACING,
+            PolicyPhase.RELEASE: ManipulationState.RELEASING,
+            PolicyPhase.RETREAT: ManipulationState.RETREATING,
+            PolicyPhase.VERIFY_PLACE: ManipulationState.VERIFYING,
+            PolicyPhase.RECOVER: ManipulationState.RECOVERING,
+            PolicyPhase.SUCCEEDED: ManipulationState.COMPLETE,
+            PolicyPhase.FAILED: ManipulationState.FAILED,
+        }[phase]
+
+    def _resolve_place_position(self) -> np.ndarray:
+        configured = self.config.controller.place_position
+        half_footprint = 0.5 * max(self.target.size[0], self.target.size[1])
+        inset = half_footprint + 0.015
+        if configured is not None:
+            place = np.asarray(configured, dtype=float).reshape(3).copy()
+            if self._work_surface is not None:
+                if not self._work_surface.contains(place, inset_m=inset):
+                    raise ValueError(
+                        "place_position does not fit inside the injected work surface"
+                    )
+                minimum_z = self.scene.support_z + 0.5 * self.target.size[2]
+                if place[2] < minimum_z - 0.005:
+                    raise ValueError("place_position would penetrate the work surface")
+            if not self.controller.is_position_reachable(
+                self.scene.data,
+                place,
+                tolerance_m=max(self.config.controller.grasp_stage_tolerance_m, 0.035),
+            ):
+                raise ValueError("place_position is not reachable by numerical IK")
+            return place
+        place = self._target_base_position.copy()
+        if self._work_surface is not None:
+            center = np.asarray(self._work_surface.center_xy, dtype=float)
+            available = np.asarray(self._work_surface.half_size_xy, dtype=float) - inset
+            axis = int(np.argmax(available))
+            direction = -1.0 if place[axis] >= center[axis] else 1.0
+            place[axis] += direction * min(0.10, max(0.04, 0.75 * available[axis]))
+            place = self._work_surface.clamp_xy(place, inset_m=inset)
+            place[2] = self.scene.support_z + 0.5 * self.target.size[2] + 0.002
+        return place
+
+    def _place_error(self, target_position: np.ndarray) -> float | None:
+        if self._pick_place_policy is None:
+            return None
+        return float(
+            np.linalg.norm(
+                np.asarray(target_position, dtype=float).reshape(3)
+                - self._place_position
+            )
+        )
 
     def _safe_grasp_point(self) -> WorldGraspPoint | None:
         try:
@@ -1093,6 +1840,29 @@ class VisualServoSimulation:
             float(np.asarray(target_position, dtype=float)[2])
             - self._grasp_initial_target_z,
         )
+
+    def _task_succeeded(
+        self, final_snapshot: SimulationState, final_error_m: float
+    ) -> bool:
+        task = self.config.controller.task.strip().lower()
+        complete = self._manipulation_state is ManipulationState.COMPLETE
+        if task == "touch":
+            return complete
+        if task == "grasp":
+            required_lift = 0.8 * self.config.controller.grasp_lift_m
+            return (
+                complete
+                and final_snapshot.grasped
+                and final_snapshot.target_lift_m >= required_lift
+            )
+        if task == "pick-place":
+            return (
+                complete
+                and final_snapshot.place_error_m is not None
+                and final_snapshot.place_error_m
+                <= self.config.controller.policy_place_tolerance_m
+            )
+        return final_error_m <= self.config.settling_threshold_m
 
     def _sleep_to_simulation_time(self, sim_start: float, wall_start: float) -> None:
         while True:
@@ -1194,16 +1964,53 @@ class VisualServoSimulation:
         capture_sim_time: float,
         capture_wall_time: float | None,
     ) -> None:
+        if (
+            self._last_observed_target is not None
+            and self._last_observed_time_s is not None
+        ):
+            dt = capture_sim_time - self._last_observed_time_s
+            if dt > 1e-4:
+                measured_velocity = clamp_norm(
+                    (position - self._last_observed_target) / dt, 0.35
+                )
+                self._estimated_target_velocity = (
+                    0.65 * self._estimated_target_velocity + 0.35 * measured_velocity
+                )
         self._last_observed_target = position.copy()
         self._last_observed_time_s = capture_sim_time
         self._last_accepted_detection_position = position.copy()
         self._last_accepted_detection = detection
+        self._last_accepted_camera_observation = self._last_camera_observation
         self._last_accepted_detection_sim_time = capture_sim_time
         self._last_accepted_detection_available_sim_time = (
             self._last_detection_available_sim_time
         )
         self._last_accepted_detection_wall_time = (
             capture_wall_time or time.perf_counter()
+        )
+
+    def _predicted_observed_target(self, time_s: float) -> np.ndarray:
+        assert self._last_observed_target is not None
+        if (
+            self.config.controller.task.strip().lower() != "standoff"
+            or self._last_observed_time_s is None
+        ):
+            return self._last_observed_target.copy()
+        prediction_horizon = float(
+            np.clip(time_s - self._last_observed_time_s, 0.0, 0.10)
+        )
+        return (
+            self._last_observed_target
+            + self._estimated_target_velocity * prediction_horizon
+        )
+
+    def _tracking_velocity_command(self, feedback_velocity: np.ndarray) -> np.ndarray:
+        velocity = np.asarray(feedback_velocity, dtype=float).reshape(3)
+        if self.config.controller.task.strip().lower() != "standoff":
+            return velocity
+        return clamp_norm(
+            velocity + self._estimated_target_velocity,
+            float(self.config.controller.max_ee_speed),
         )
 
     def _enter_tracking(
@@ -1247,8 +2054,18 @@ class VisualServoSimulation:
         if self._lost_since_sim_time is None:
             self._lost_since_sim_time = time_s
         self._tracking_state = TrackingState.LOST
-        self._last_observed_target = None
-        self._last_observed_time_s = None
+        if self._manipulation_state not in {
+            ManipulationState.CLOSING,
+            ManipulationState.LIFTING,
+            ManipulationState.TRANSFERRING,
+            ManipulationState.PLACING,
+            ManipulationState.RELEASING,
+            ManipulationState.RETREATING,
+            ManipulationState.VERIFYING,
+            ManipulationState.RECOVERING,
+        }:
+            self._last_observed_target = None
+            self._last_observed_time_s = None
         # Old-target jump gating must not make a moved target impossible to
         # reacquire after an occlusion.
         self._last_accepted_detection_position = None
@@ -1344,6 +2161,7 @@ class VisualServoSimulation:
         self._latest_overlay_bgr = self._draw_camera_overlay(
             observation, detection, False
         )
+        self._record_dashboard(self._latest_overlay_bgr)
         self._latest_overlay_rgb = None
         delivered = self._queue_detection(
             detection, observation, defer=due_detection is not None
@@ -1365,6 +2183,7 @@ class VisualServoSimulation:
                 self._latest_overlay_bgr = self._draw_camera_overlay(
                     observation, detection, False
                 )
+                self._record_dashboard(self._latest_overlay_bgr)
                 self._latest_overlay_rgb = None
             except Exception as exc:
                 self._perception_disabled = True
@@ -1386,6 +2205,7 @@ class VisualServoSimulation:
                 self._latest_overlay_bgr = self._draw_camera_overlay(
                     observation, None, True
                 )
+                self._record_dashboard(self._latest_overlay_bgr)
                 self._latest_overlay_rgb = None
                 if self._perception_executor is not None:
                     prompt = self._perception_prompt()
@@ -1407,6 +2227,8 @@ class VisualServoSimulation:
         *,
         defer: bool,
     ) -> Detection | None:
+        if observation is not None:
+            self._detection_observations[id(detection)] = observation
         capture_sim = (
             float(self.scene.data.time)
             if observation is None
@@ -1468,6 +2290,9 @@ class VisualServoSimulation:
         available_sim: float,
         available_wall: float,
     ) -> None:
+        observation = self._detection_observations.pop(id(detection), None)
+        if observation is not None:
+            self._last_camera_observation = observation
         self._last_detection = detection
         self._last_detection_sim_time = capture_sim
         self._last_detection_wall_time = capture_wall
@@ -1800,9 +2625,10 @@ class VisualServoSimulation:
         image = observation.frame_bgr.copy()
         if detection is not None and detection.mask is not None:
             mask = detection.mask > 0
-            color = np.zeros_like(image)
-            color[:, :, 1] = 180
-            image[mask] = cv2.addWeighted(image[mask], 0.55, color[mask], 0.45, 0)
+            if np.any(mask):
+                color = np.zeros_like(image)
+                color[:, :, 1] = 180
+                image[mask] = cv2.addWeighted(image[mask], 0.55, color[mask], 0.45, 0)
         if detection is not None and detection.bbox_xyxy is not None:
             bbox = self._overlay_bbox(detection.bbox_xyxy, image.shape)
             if bbox is not None:
@@ -1855,6 +2681,41 @@ class VisualServoSimulation:
         )
         return image
 
+    def _record_dashboard(self, camera_overlay: np.ndarray | None) -> None:
+        if self._recorder is None or camera_overlay is None:
+            return
+        state = self._last_servo_state
+        evidence = self._grasp_evidence
+        dashboard = self._dashboard.render(
+            camera_overlay,
+            DashboardTelemetry(
+                robot=self.robot.name,
+                target=self.target.name,
+                servo_mode=(
+                    self.config.controller.servo_mode
+                    if state is None
+                    else state.servo_mode
+                ),
+                actuator_mode=self.controller.actuator_mode,
+                tracking_state=self._tracking_state.value,
+                manipulation_state=(
+                    self.config.controller.task.strip().upper()
+                    if self._manipulation_state is ManipulationState.IDLE
+                    else self._manipulation_state.value
+                ),
+                sim_time_s=float(self.scene.data.time),
+                position_error_m=0.0 if state is None else state.position_error_m,
+                image_error_px=0.0 if state is None else state.image_error_px,
+                contact_force_n=0.0 if evidence is None else evidence.normal_force_n,
+                policy_phase=(
+                    None
+                    if self._pick_place_policy is None
+                    else self._pick_place_policy.phase.value
+                ),
+            ),
+        )
+        self._recorder.write(dashboard)
+
     @staticmethod
     def _overlay_bbox(
         bbox_xyxy: np.ndarray, image_shape: tuple[int, int, int]
@@ -1888,8 +2749,8 @@ class VisualServoSimulation:
         if not np.isfinite(point).all():
             return None
         h, w = image_shape[:2]
-        x = max(0, min(w - 1, int(round(point[0]))))
-        y = max(0, min(h - 1, int(round(point[1]))))
+        x = max(0, min(w - 1, round(point[0])))
+        y = max(0, min(h - 1, round(point[1])))
         return x, y
 
     def _update_viewer_overlay(self, viewer) -> None:

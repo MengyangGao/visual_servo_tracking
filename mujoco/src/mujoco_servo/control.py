@@ -31,6 +31,8 @@ class ServoState:
     actuator_mode: str = "position"
     saturated_joints: int = 0
     adaptive_damping: float = 0.0
+    servo_mode: str = "pbvs"
+    image_error_px: float = 0.0
 
 
 def desired_ee_position(
@@ -39,14 +41,20 @@ def desired_ee_position(
     ee_position: np.ndarray,
     config: ControllerConfig,
     front_origin: np.ndarray | tuple[float, float, float] | None = None,
+    standoff_direction_world: np.ndarray | None = None,
 ) -> np.ndarray:
     target = np.asarray(target_position, dtype=float).reshape(3)
     ee = np.asarray(ee_position, dtype=float).reshape(3)
     mode = task.strip().lower()
-    if mode in {"contact", "touch", "grasp"}:
+    if mode in {"contact", "touch", "grasp", "pick-place"}:
         return target.copy()
     if mode == "standoff":
-        direction = normalize(ee - target, np.array([-1.0, 0.0, 0.0]))
+        direction = normalize(
+            ee - target
+            if standoff_direction_world is None
+            else np.asarray(standoff_direction_world, dtype=float).reshape(3),
+            np.array([-1.0, 0.0, 0.0]),
+        )
         return target + direction * float(config.standoff_m)
     if mode == "front-standoff":
         origin = (
@@ -99,6 +107,7 @@ class ResolvedRateController:
         self.ee_frame_offset = np.asarray(ee_frame_offset, dtype=float).reshape(3)
         self.config = config
         self._filtered_target: np.ndarray | None = None
+        self._standoff_direction_world: np.ndarray | None = None
         self._joint_ids = [
             mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
             for name in robot.joint_names
@@ -106,7 +115,9 @@ class ResolvedRateController:
         if any(joint_id < 0 for joint_id in self._joint_ids):
             missing = [
                 name
-                for name, joint_id in zip(robot.joint_names, self._joint_ids)
+                for name, joint_id in zip(
+                    robot.joint_names, self._joint_ids, strict=True
+                )
                 if joint_id < 0
             ]
             raise RuntimeError(
@@ -131,6 +142,22 @@ class ResolvedRateController:
         self._dof_adr = np.array(
             [model.jnt_dofadr[joint_id] for joint_id in self._joint_ids], dtype=int
         )
+        # MuJoCo integrates joint damping implicitly.  Put the derivative part
+        # of effort control there instead of evaluating -kd*qvel explicitly in
+        # Python: light wrist links in Menagerie models otherwise make an
+        # otherwise reasonable PD law numerically stiff at a 2 ms timestep.
+        self._effort_damping = 0.0
+        if self.actuator_mode in {"torque", "impedance"}:
+            if self.actuator_mode == "impedance":
+                _, kd_scale = robot.impedance_gain_scale
+                derivative_gain = float(getattr(config, "impedance_kd", 6.0)) * kd_scale
+            else:
+                _, kd_scale = robot.torque_gain_scale
+                derivative_gain = float(getattr(config, "torque_kd", 8.0)) * kd_scale
+            self._effort_damping = float(derivative_gain)
+            model.dof_damping[self._dof_adr] = np.maximum(
+                model.dof_damping[self._dof_adr], self._effort_damping
+            )
         self._qpos_home = np.array(robot.home_qpos, dtype=float)
         if self._qpos_home.shape != (len(self._joint_ids),):
             raise RuntimeError(
@@ -160,9 +187,108 @@ class ResolvedRateController:
         self._qpos_command = np.array(data.qpos[self._qpos_adr], dtype=float)
         self._last_qvel_command = np.zeros(len(self._joint_ids), dtype=float)
         self._filtered_target = None
+        self._standoff_direction_world = None
         self._hold_qpos = None
         self._last_saturated_joints = 0
         self._passive_actuator_overrides.clear()
+
+    def desired_position(
+        self, data: mujoco.MjData, target_position: np.ndarray
+    ) -> np.ndarray:
+        """Return the task goal while preserving a fixed tracking offset."""
+        target = np.asarray(target_position, dtype=float).reshape(3)
+        ee_position = frame_position(
+            self.model,
+            data,
+            self.ee_frame_type,
+            self.ee_frame_name,
+            self.ee_frame_offset,
+        )
+        if (
+            self.config.task.strip().lower() == "standoff"
+            and self._standoff_direction_world is None
+        ):
+            base = np.asarray(self.robot.base_position, dtype=float).reshape(3)
+            preferred = self.robot.preferred_standoff_direction
+            self._standoff_direction_world = normalize(
+                base - target
+                if preferred is None
+                else np.asarray(preferred, dtype=float).reshape(3),
+                ee_position - target,
+            )
+        return desired_ee_position(
+            self.config.task,
+            target,
+            ee_position,
+            self.config,
+            self.robot.base_position,
+            self._standoff_direction_world,
+        )
+
+    def is_position_reachable(
+        self,
+        data: mujoco.MjData,
+        target_position: np.ndarray,
+        *,
+        tolerance_m: float = 0.025,
+        max_iterations: int = 80,
+    ) -> bool:
+        """Test Cartesian reachability with bounded numerical IK on scratch data.
+
+        This never mutates the live simulation.  Unlike a radius check it
+        respects the robot's current kinematic chain and declared joint limits.
+        """
+        target = np.asarray(target_position, dtype=float).reshape(3)
+        if not np.isfinite(target).all():
+            return False
+        scratch = mujoco.MjData(self.model)
+        scratch.qpos[:] = data.qpos
+        scratch.qvel[:] = 0.0
+        if self.model.nmocap:
+            scratch.mocap_pos[:] = data.mocap_pos
+            scratch.mocap_quat[:] = data.mocap_quat
+        mujoco.mj_forward(self.model, scratch)
+        for _ in range(max(1, int(max_iterations))):
+            position = frame_position(
+                self.model,
+                scratch,
+                self.ee_frame_type,
+                self.ee_frame_name,
+                self.ee_frame_offset,
+            )
+            error = target - position
+            if float(np.linalg.norm(error)) <= float(tolerance_m):
+                return True
+            jacp = np.zeros((3, self.model.nv), dtype=float)
+            jacr = np.zeros((3, self.model.nv), dtype=float)
+            if self.ee_frame_type == "site":
+                mujoco.mj_jacSite(self.model, scratch, jacp, jacr, self._frame_id)
+            elif self.ee_frame_type == "body_point":
+                mujoco.mj_jac(self.model, scratch, jacp, jacr, position, self._frame_id)
+            else:
+                mujoco.mj_jacBody(self.model, scratch, jacp, jacr, self._frame_id)
+            joint_jacobian = jacp[:, self._dof_adr]
+            step = damped_pseudo_inverse(joint_jacobian, 0.04) @ clamp_norm(error, 0.08)
+            step = np.clip(step, -0.18, 0.18)
+            scratch.qpos[self._qpos_adr] += step
+            for index, joint_id in enumerate(self._joint_ids):
+                if self.model.jnt_limited[joint_id]:
+                    low, high = self.model.jnt_range[joint_id]
+                    margin = min(
+                        float(self.config.joint_limit_margin), 0.2 * (high - low)
+                    )
+                    scratch.qpos[self._qpos_adr[index]] = np.clip(
+                        scratch.qpos[self._qpos_adr[index]], low + margin, high - margin
+                    )
+            mujoco.mj_forward(self.model, scratch)
+        final = frame_position(
+            self.model,
+            scratch,
+            self.ee_frame_type,
+            self.ee_frame_name,
+            self.ee_frame_offset,
+        )
+        return float(np.linalg.norm(target - final)) <= float(tolerance_m)
 
     def set_gripper_closed(self, closed: bool) -> None:
         """Latch gripper controls so subsequent arm updates cannot reopen it."""
@@ -170,7 +296,7 @@ class ResolvedRateController:
             self.robot.gripper_closed_ctrl if closed else self.robot.gripper_open_ctrl
         )
         self._passive_actuator_overrides.clear()
-        for name, value in zip(self.robot.gripper_actuator_names, values):
+        for name, value in zip(self.robot.gripper_actuator_names, values, strict=True):
             actuator_id = resolve_passive_actuator(self.model, self.robot, name, value)
             self._passive_actuator_overrides[actuator_id] = float(value)
 
@@ -254,6 +380,9 @@ class ResolvedRateController:
         time_s: float,
         step_index: int,
         dt: float | None = None,
+        *,
+        cartesian_velocity_world: np.ndarray | None = None,
+        desired_rotation_world: np.ndarray | None = None,
     ) -> ServoState:
         target = np.asarray(target_position, dtype=float).reshape(3)
         if self._filtered_target is None:
@@ -271,19 +400,22 @@ class ResolvedRateController:
             self.ee_frame_name,
             self.ee_frame_offset,
         )
-        desired = desired_ee_position(
-            self.config.task,
-            self._filtered_target,
-            ee_pos,
-            self.config,
-            self.robot.base_position,
-        )
+        desired = self.desired_position(data, self._filtered_target)
         error = desired - ee_pos
-        ee_velocity = clamp_norm(
-            float(self.config.position_gain) * error, self.config.max_ee_speed
+        ee_velocity = (
+            clamp_norm(
+                float(self.config.position_gain) * error, self.config.max_ee_speed
+            )
+            if cartesian_velocity_world is None
+            else clamp_norm(
+                np.asarray(cartesian_velocity_world, dtype=float).reshape(3),
+                self.config.max_ee_speed,
+            )
         )
-        desired_rotation = desired_ee_orientation(
-            self.config.task, self._filtered_target, desired
+        desired_rotation = (
+            desired_ee_orientation(self.config.task, self._filtered_target, desired)
+            if desired_rotation_world is None
+            else np.asarray(desired_rotation_world, dtype=float).reshape(3, 3)
         )
 
         jacp = np.zeros((3, self.model.nv), dtype=float)
@@ -335,8 +467,10 @@ class ResolvedRateController:
             correction = damped_pseudo_inverse(correction_jac, adaptive_damping) @ (
                 angular_velocity - orientation_jac @ qvel
             )
-            position_gate = float(
-                np.clip(1.0 - np.linalg.norm(error) / 0.025, 0.0, 1.0)
+            position_gate = (
+                1.0
+                if desired_rotation_world is not None
+                else float(np.clip(1.0 - np.linalg.norm(error) / 0.025, 0.0, 1.0))
             )
             qvel = qvel + (0.30 * position_gate) * (primary_nullspace @ correction)
             stacked_jac = np.vstack([position_jac, orientation_jac])
@@ -481,10 +615,9 @@ class ResolvedRateController:
     ) -> int:
         del dt_s  # Kept explicit in this boundary for future discrete actuator models.
         mode = self.actuator_mode
-        if mode not in {"position", "velocity", "torque"}:
+        if mode not in {"position", "velocity", "torque", "impedance"}:
             raise ValueError(f"unknown actuator mode '{mode}'")
         current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
-        current_qvel = np.asarray(data.qvel[self._dof_adr], dtype=float)
         if mode == "position":
             controls = self._actuator_gears * np.asarray(
                 position_reference, dtype=float
@@ -506,16 +639,22 @@ class ResolvedRateController:
                 qvel_command, dtype=float
             ) + bias / (self._actuator_gears * gains)
         else:
-            kp = float(getattr(self.config, "torque_kp", 80.0))
-            kd = float(getattr(self.config, "torque_kd", 8.0))
+            if mode == "impedance":
+                kp_scale, kd_scale = self.robot.impedance_gain_scale
+                kp = float(getattr(self.config, "impedance_kp", 35.0)) * kp_scale
+                kd = float(getattr(self.config, "impedance_kd", 6.0)) * kd_scale
+            else:
+                kp_scale, kd_scale = self.robot.torque_gain_scale
+                kp = float(getattr(self.config, "torque_kp", 80.0)) * kp_scale
+                kd = float(getattr(self.config, "torque_kd", 8.0)) * kd_scale
             generalized_torque = (
                 np.asarray(data.qfrc_bias[self._dof_adr], dtype=float)
                 + kp * (np.asarray(position_reference, dtype=float) - current_qpos)
-                + kd * (np.asarray(qvel_command, dtype=float) - current_qvel)
+                + kd * np.asarray(qvel_command, dtype=float)
             )
             controls = generalized_torque / self._actuator_gears
         saturated = 0
-        for actuator_id, value in zip(self._actuator_ids, controls):
+        for actuator_id, value in zip(self._actuator_ids, controls, strict=True):
             saturated += int(self._write_ctrl(data, actuator_id, float(value)))
         for actuator_id, value in self._passive_actuator_ids:
             self._write_ctrl(
@@ -530,6 +669,16 @@ class ResolvedRateController:
         if self.ee_frame_type == "site":
             return np.array(data.site_xmat[self._frame_id], dtype=float).reshape(3, 3)
         return np.array(data.xmat[self._frame_id], dtype=float).reshape(3, 3)
+
+    def frame_position(self, data: mujoco.MjData) -> np.ndarray:
+        """Return this controller's configured tool point in world coordinates."""
+        return frame_position(
+            self.model,
+            data,
+            self.ee_frame_type,
+            self.ee_frame_name,
+            self.ee_frame_offset,
+        )
 
     def _actuator_id_for_joint(self, joint_name: str, index: int) -> int:
         return resolve_joint_actuator(self.model, self.robot, joint_name, index)

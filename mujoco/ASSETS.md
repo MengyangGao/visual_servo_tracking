@@ -4,11 +4,19 @@
 
 The repository pins Google DeepMind MuJoCo Menagerie as `mujoco/vendor/mujoco_menagerie`.
 
-| Robot | MJCF | Asset directory | Grasp attachment |
-| --- | --- | --- | --- |
-| Franka Panda (`panda`) | `franka_emika_panda/panda.xml` | `franka_emika_panda/assets/` | `hand`, with official coupled-finger actuator metadata |
-| Universal Robots UR5e (`ur5e`) | `universal_robots_ur5e/ur5e.xml` | `universal_robots_ur5e/assets/` | `wrist_3_link` weld/suction abstraction |
-| UFactory Lite6 (`lite6`) | `ufactory_lite6/lite6.xml` | `ufactory_lite6/assets/` | `link6` weld/suction abstraction |
+| CLI name | Menagerie MJCF | Contact gripper |
+| --- | --- | --- |
+| `panda` | `franka_emika_panda/panda.xml` | official coupled fingers |
+| `fr3` | `franka_fr3/fr3.xml` | tool attachment only |
+| `ur5e` | `universal_robots_ur5e/ur5e.xml` | tool attachment only |
+| `ur10e` | `universal_robots_ur10e/ur10e.xml` | tool attachment only |
+| `lite6` | `ufactory_lite6/lite6.xml` | tool attachment only |
+| `xarm7` | `ufactory_xarm7/xarm7.xml` | official coupled fingers |
+| `iiwa14` | `kuka_iiwa_14/iiwa14.xml` | tool attachment only |
+| `kinova-gen3` | `kinova_gen3/gen3.xml` | tool attachment only |
+| `sawyer` | `rethink_robotics_sawyer/sawyer.xml` | tool attachment only |
+| `g1-right-arm` | `unitree_g1/g1_with_hands.xml` | fixed-base upper-body example |
+| `g1-left-arm` | `unitree_g1/g1_with_hands.xml` | fixed-base upper-body example |
 
 Initialize and inspect the pinned checkout with:
 
@@ -54,6 +62,9 @@ Preserve Menagerie's top-level `LICENSE`, `CITATION.cff`, and model-specific att
       "gripper_actuator_names": ["gripper"],
       "gripper_open_ctrl": [1.0],
       "gripper_closed_ctrl": [0.0],
+      "gripper_contact_bodies": ["left_finger", "right_finger"],
+      "torque_gain_scale": [1.0, 1.0],
+      "impedance_gain_scale": [1.0, 1.0],
       "passive_actuator_ctrl": {},
       "aliases": ["arm-alias"]
     }
@@ -69,13 +80,15 @@ Controlled joints must be named scalar hinge/slide joints, and each named actuat
 
 - original compatible position servos;
 - controlled actuator rewriting to MuJoCo velocity servos;
-- controlled actuator rewriting to torque motors.
+- controlled actuator rewriting to torque/impedance motors.
 
 Passive actuators, such as a gripper, are not rewritten. A custom MJCF must currently be a self-contained `<mujoco>` document; `<include>` is rejected. Reachability, collision safety, actuator tuning, and controller stability cannot be inferred from the descriptor alone.
 
+`torque_gain_scale` and `impedance_gain_scale` multiply the global CLI proportional/derivative gains for a specific robot. This keeps one user-facing tuning interface while allowing models with very different reflected inertia and force limits to ship stable defaults. Both fields default to `[1.0, 1.0]`; the proportional scale must be positive and the derivative scale non-negative.
+
 ## Target descriptor version 1
 
-Built-ins are `apple`, `bottle`, `box`, `capsule`, `cup`, `cylinder`, `dumbbell`, `hammer`, `phone`, `sphere`, and `tower`.
+Built-ins are `apple`, `bottle`, `box`, `capsule`, `cup`, `cylinder`, `dumbbell`, `grasp-cube`, `hammer`, `phone`, `sphere`, and `tower`.
 
 Target files accept one list or a versioned wrapper. Custom targets support:
 
@@ -124,7 +137,7 @@ Mesh paths resolve relative to the descriptor and remain external runtime assets
 - `"dynamics": "visual"` is the default and preserves the mocap-controlled, non-colliding visual reference behavior.
 - `"dynamics": "physical"` creates a colliding free body using the configured mass and MuJoCo friction triplet. It falls under gravity and can contact the injected table/floor.
 
-Physical targets receive a disabled weld equality when the selected robot declares `grasp_attachment_body`. The runtime can activate or deactivate it through `activate_grasp()` and `deactivate_grasp()`. This provides deterministic grasp-task attachment; it is not a physics claim about force closure.
+Physical targets never receive a weld equality. `activate_grasp()` closes the declared gripper; `ContactGraspEvaluator` requires two distinct contact bodies, opposing normals, minimum normal force, bounded relative slip, and consecutive stable frames before a grasp can be reported.
 
 Grasp-point `position` and `approach` use target-local coordinates. `approach` points along the final motion from pregrasp to grasp and is normalized. Optional widths are checked against robot gripper metadata when available. A default center top-down grasp point is generated when none is specified.
 
@@ -132,4 +145,4 @@ Grasp-point `position` and `approach` use target-local coordinates. `approach` p
 
 `EnvironmentSpec` independently enables the injected floor, table, and lights. A world-fixed camera creates `camera_marker`; a `CameraConfig.mount_body` camera is injected directly beneath the named robot body and uses body-local position/look-at coordinates.
 
-Injected `servo_*`, `target*`, camera, and weld names are reserved. Conflicts fail early with a rename error.
+Injected `servo_*`, `target*`, and camera names are reserved. Conflicts fail early with a rename error.

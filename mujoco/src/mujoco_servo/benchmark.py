@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 from .app import VisualServoSimulation
 from .config import (
@@ -15,7 +15,6 @@ from .config import (
     available_tasks,
     available_trajectories,
 )
-
 
 DEFAULT_TARGETS = {"panda": "cup", "ur5e": "box", "lite6": "box"}
 
@@ -48,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=1200)
     parser.add_argument("--static-position-mm", type=float, default=10.0)
     parser.add_argument("--moving-rms-mm", type=float, default=20.0)
+    parser.add_argument("--moving-path-ratio-min", type=float, default=0.8)
+    parser.add_argument("--moving-path-ratio-max", type=float, default=1.2)
     parser.add_argument("--orientation-deg", type=float, default=10.0)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
@@ -98,6 +99,15 @@ def run_matrix(args: argparse.Namespace) -> dict:
                     )
                     orientation_limit = args.orientation_deg * 3.141592653589793 / 180.0
                     orientation_required = args.task == "front-standoff"
+                    path_ratio = float(result.get("tracking_path_ratio", 1.0))
+                    path_checked = trajectory != "static"
+                    path_passed = (
+                        args.moving_path_ratio_min
+                        <= path_ratio
+                        <= args.moving_path_ratio_max
+                        if path_checked
+                        else True
+                    )
                     orientation_passed = (
                         result.get("final_orientation_error_rad", 0.0)
                         <= orientation_limit
@@ -108,10 +118,16 @@ def run_matrix(args: argparse.Namespace) -> dict:
                         "position_metric_m": position_metric,
                         "position_limit_m": position_limit,
                         "orientation_limit_rad": orientation_limit,
+                        "tracking_path_ratio": path_ratio,
+                        "path_ratio_min": args.moving_path_ratio_min,
+                        "path_ratio_max": args.moving_path_ratio_max,
                         "passed": bool(
-                            position_metric <= position_limit and orientation_passed
+                            position_metric <= position_limit
+                            and orientation_passed
+                            and path_passed
                         ),
                         "orientation_checked": orientation_required,
+                        "path_ratio_checked": path_checked,
                     }
                     scenarios.append(result)
     return {
@@ -119,6 +135,8 @@ def run_matrix(args: argparse.Namespace) -> dict:
         "thresholds": {
             "static_position_mm": args.static_position_mm,
             "moving_rms_mm": args.moving_rms_mm,
+            "moving_path_ratio_min": args.moving_path_ratio_min,
+            "moving_path_ratio_max": args.moving_path_ratio_max,
             "orientation_deg": args.orientation_deg,
         },
         "wall_duration_s": time.perf_counter() - started,
