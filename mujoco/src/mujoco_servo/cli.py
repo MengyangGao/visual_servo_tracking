@@ -155,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--standoff-cm",
         type=float,
-        default=16.0,
+        default=10.0,
         help="standoff distance in centimeters for standoff/front-standoff",
     )
     parser.add_argument(

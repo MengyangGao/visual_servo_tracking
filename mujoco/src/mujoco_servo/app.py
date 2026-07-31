@@ -502,7 +502,10 @@ class VisualServoSimulation:
         radial_norm = float(np.linalg.norm(radial))
         radial = radial / radial_norm if radial_norm > 1e-9 else np.array([1.0, 0.0])
         side = np.array([radial[1], -radial[0]], dtype=float)
-        if side[1] > 0.0:
+        # Prefer the positive-Y side of the table.  For the default Panda
+        # workspace this keeps the wrist behind the target in the camera view,
+        # which avoids losing a target at short standoff distances.
+        if side[1] < 0.0:
             side = -side
         position = target + np.array([1.2 * side[0], 1.2 * side[1], 0.7], dtype=float)
         return replace(camera, position=tuple(position), lookat=tuple(target))

@@ -538,7 +538,7 @@ def test_default_camera_frames_each_robot_workspace_and_custom_pose_is_preserved
     approach = np.asarray(ur_app.camera.lookat)[:2]
     assert np.isclose(np.linalg.norm(offset[:2]), 1.2)
     assert np.isclose(np.dot(offset[:2], approach), 0.0, atol=1e-9)
-    assert offset[1] <= 0.0
+    assert offset[1] >= 0.0
     assert np.isclose(offset[2], 0.7)
 
     custom = CameraConfig(position=(2.0, -2.0, 1.5), lookat=(0.0, 0.0, 0.2))

@@ -135,6 +135,22 @@ class ResolvedRateController:
         self._dof_adr = np.array(
             [model.jnt_dofadr[joint_id] for joint_id in self._joint_ids], dtype=int
         )
+        # MuJoCo integrates joint damping implicitly.  Put the derivative part
+        # of effort control there instead of evaluating -kd*qvel explicitly in
+        # Python: light wrist links in Menagerie models otherwise make an
+        # otherwise reasonable PD law numerically stiff at a 2 ms timestep.
+        self._effort_damping = 0.0
+        if self.actuator_mode in {"torque", "impedance"}:
+            if self.actuator_mode == "impedance":
+                _, kd_scale = robot.impedance_gain_scale
+                derivative_gain = float(getattr(config, "impedance_kd", 6.0)) * kd_scale
+            else:
+                _, kd_scale = robot.torque_gain_scale
+                derivative_gain = float(getattr(config, "torque_kd", 8.0)) * kd_scale
+            self._effort_damping = float(derivative_gain)
+            model.dof_damping[self._dof_adr] = np.maximum(
+                model.dof_damping[self._dof_adr], self._effort_damping
+            )
         self._qpos_home = np.array(robot.home_qpos, dtype=float)
         if self._qpos_home.shape != (len(self._joint_ids),):
             raise RuntimeError(
@@ -567,7 +583,6 @@ class ResolvedRateController:
         if mode not in {"position", "velocity", "torque", "impedance"}:
             raise ValueError(f"unknown actuator mode '{mode}'")
         current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
-        current_qvel = np.asarray(data.qvel[self._dof_adr], dtype=float)
         if mode == "position":
             controls = self._actuator_gears * np.asarray(
                 position_reference, dtype=float
@@ -600,7 +615,7 @@ class ResolvedRateController:
             generalized_torque = (
                 np.asarray(data.qfrc_bias[self._dof_adr], dtype=float)
                 + kp * (np.asarray(position_reference, dtype=float) - current_qpos)
-                + kd * (np.asarray(qvel_command, dtype=float) - current_qvel)
+                + kd * np.asarray(qvel_command, dtype=float)
             )
             controls = generalized_torque / self._actuator_gears
         saturated = 0

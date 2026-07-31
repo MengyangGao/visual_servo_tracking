@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mujoco_servo.app import VisualServoSimulation
 from mujoco_servo.config import ROBOT_SPECS, CameraConfig, ControllerConfig, DemoConfig
@@ -170,3 +171,40 @@ def test_g1_robot_specific_effort_gains_converge_for_both_arms() -> None:
             ).run()
             assert summary.final_error_m < 0.001
             assert summary.task_succeeded
+
+
+@pytest.mark.parametrize("robot", ["iiwa14", "kinova-gen3"])
+@pytest.mark.parametrize("actuator_mode", ["torque", "impedance"])
+def test_low_inertia_menagerie_arms_have_stable_effort_control(
+    robot: str, actuator_mode: str
+) -> None:
+    config = ControllerConfig(task="standoff", actuator_mode=actuator_mode)
+    simulation = VisualServoSimulation(
+        DemoConfig(
+            robot=robot,
+            target="cup",
+            detector="oracle",
+            trajectory="static",
+            steps=1200,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            manual_control=False,
+            controller=config,
+        )
+    )
+    dof_addresses = simulation.controller._dof_adr
+    gain_scale = (
+        ROBOT_SPECS[robot].torque_gain_scale[1]
+        if actuator_mode == "torque"
+        else ROBOT_SPECS[robot].impedance_gain_scale[1]
+    )
+    derivative_gain = (
+        config.torque_kd if actuator_mode == "torque" else config.impedance_kd
+    ) * gain_scale
+    assert np.all(simulation.scene.model.dof_damping[dof_addresses] >= derivative_gain)
+
+    summary = simulation.run()
+    assert np.isfinite(summary.rms_error_m)
+    assert summary.final_error_m < 0.01
+    assert summary.task_succeeded

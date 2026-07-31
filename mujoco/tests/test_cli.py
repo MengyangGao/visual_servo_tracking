@@ -136,6 +136,8 @@ def test_cli_defaults_to_color_and_preserves_prompt() -> None:
     )
     assert config.detector == "color"
     assert config.controller.task == "standoff"
+    assert config.controller.standoff_m == pytest.approx(0.10)
+    assert ControllerConfig().standoff_m == pytest.approx(0.10)
     assert config.detection_timeout_s == 0.75
     assert config.perception_prompt == "red mug"
     assert config.robot_file is None

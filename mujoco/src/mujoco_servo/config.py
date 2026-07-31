@@ -102,7 +102,7 @@ class ControllerConfig:
     damping: float = 0.08
     max_ee_speed: float = 1.05
     max_joint_speed: float = 2.6
-    standoff_m: float = 0.16
+    standoff_m: float = 0.10
     align_offset_m: float = 0.0
     orientation_gain: float = 1.2
     max_angular_speed: float = 1.0
@@ -390,7 +390,7 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         aliases=("unitree-g1", "unitree_g1", "g1"),
         grasp_attachment_body="right_wrist_yaw_link",
         fixed_base=True,
-        torque_gain_scale=(0.25, 0.5),
+        torque_gain_scale=(0.10, 0.4),
         impedance_gain_scale=(0.35, 0.5),
     ),
     "g1-left-arm": RobotSpec(
@@ -424,7 +424,7 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         aliases=("unitree-g1-left", "unitree_g1_left", "g1-left"),
         grasp_attachment_body="left_wrist_yaw_link",
         fixed_base=True,
-        torque_gain_scale=(0.25, 0.5),
+        torque_gain_scale=(0.10, 0.4),
         impedance_gain_scale=(0.35, 0.5),
     ),
 }

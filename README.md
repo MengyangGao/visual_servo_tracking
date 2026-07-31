@@ -4,7 +4,7 @@
 
 ![Panda 跟随移动目标](mujoco/media/visual-servo-dashboard.gif)
 
-这段 15 秒录屏使用 Panda、固定 RGB-D 相机、颜色分割和 Hybrid 视觉伺服。红色杯子沿圆周移动，控制器只使用视觉观测更新末端目标，没有用 oracle 代替检测。录制期间完成 360 次视觉更新，没有发生跟踪丢失。下载原始画质：[MP4](mujoco/media/visual-servo-dashboard.mp4) · [PNG](mujoco/media/visual-servo-dashboard.png)
+这段 15 秒录屏使用 Panda、固定 RGB-D 相机、颜色分割和 Hybrid 视觉伺服。红色杯子沿圆周移动，机械臂默认保持 `10 cm` 距离；控制器只使用视觉观测更新末端目标，没有用 oracle 代替检测。录制期间完成 360 次视觉更新，没有发生跟踪丢失，稳态 RMS 跟随误差为 `11.9 mm`。下载原始画质：[MP4](mujoco/media/visual-servo-dashboard.mp4) · [PNG](mujoco/media/visual-servo-dashboard.png)
 
 ## 项目包含什么
 
@@ -57,7 +57,7 @@ macOS 的 MuJoCo 相机和原生 viewer 需要从 `mjpython` 启动：
 conda activate visual_servo
 mjpython mujoco/scripts/demo.py \
   --robot panda --target cup --trajectory circle \
-  --detector color --servo-mode hybrid --standoff-cm 22
+  --detector color --servo-mode hybrid
 ```
 
 viewer 相机可以自由移动。方向键可给目标叠加水平速度，`,` 和 `.` 控制下降/上升，Space 或 Backspace 清除手动偏移。
