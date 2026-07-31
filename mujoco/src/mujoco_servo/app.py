@@ -995,16 +995,30 @@ class VisualServoSimulation:
             if self.config.realtime:
                 self._sleep_to_simulation_time(sim_start, wall_start)
             policy = self._pick_place_policy
-            if (
-                self.config.stop_on_terminal
-                and policy is not None
-                and (policy.succeeded or policy.failed)
+            task = self.config.controller.task.strip().lower()
+            manipulation_terminal = (
+                policy is None
+                and task in {"touch", "grasp"}
+                and self._manipulation_state
+                in {ManipulationState.COMPLETE, ManipulationState.FAILED}
+            )
+            if self.config.stop_on_terminal and (
+                (policy is not None and (policy.succeeded or policy.failed))
+                or manipulation_terminal
             ):
                 terminal_steps += 1
                 if terminal_steps >= self.config.terminal_settle_steps:
-                    termination_reason = (
-                        "policy_succeeded" if policy.succeeded else "policy_failed"
-                    )
+                    if policy is not None:
+                        termination_reason = (
+                            "policy_succeeded" if policy.succeeded else "policy_failed"
+                        )
+                    else:
+                        result = (
+                            "succeeded"
+                            if self._manipulation_state is ManipulationState.COMPLETE
+                            else "failed"
+                        )
+                        termination_reason = f"{task}_{result}"
                     break
             else:
                 terminal_steps = 0
@@ -1159,22 +1173,7 @@ class VisualServoSimulation:
                 else tuple(float(value) for value in self._place_position)
             ),
             place_error_m=self._place_error(final_snapshot.target_position),
-            task_succeeded=(
-                (
-                    self._manipulation_state is ManipulationState.COMPLETE
-                    and (
-                        self.config.controller.task.strip().lower() != "pick-place"
-                        or (
-                            final_snapshot.place_error_m is not None
-                            and final_snapshot.place_error_m
-                            <= self.config.controller.policy_place_tolerance_m
-                        )
-                    )
-                )
-                if self.config.controller.task.strip().lower()
-                in {"touch", "grasp", "pick-place"}
-                else final_error <= self.config.settling_threshold_m
-            ),
+            task_succeeded=self._task_succeeded(final_snapshot, final_error),
             failure_reason=(
                 None
                 if self._pick_place_policy is None
@@ -1467,6 +1466,10 @@ class VisualServoSimulation:
             self.scene.ee_frame_name,
             self.scene.ee_frame_offset,
         )
+        if self._grasp_initial_target_z is not None:
+            self._max_target_lift_m = max(
+                self._max_target_lift_m, self._target_lift(truth)
+            )
         in_contact = self._target_robot_contact()
         if in_contact:
             self._contact_steps += 1
@@ -1510,7 +1513,10 @@ class VisualServoSimulation:
                 self._manipulation_state = ManipulationState.FAILED
                 return ee.copy(), ee.copy()
 
-        if self._manipulation_state is ManipulationState.LIFTING:
+        if self._manipulation_state in {
+            ManipulationState.LIFTING,
+            ManipulationState.COMPLETE,
+        }:
             assert self._lift_goal_position is not None
             assert self._grasp_evaluator is not None
             self._grasp_evidence = self._grasp_evaluator.evaluate(self.scene.data)
@@ -1523,14 +1529,15 @@ class VisualServoSimulation:
                 self._grasped = False
                 self._manipulation_state = ManipulationState.FAILED
                 return ee.copy(), ee.copy()
-            current_target = site_position(
-                self.scene.model, self.scene.data, self.scene.target_site_name
-            )
-            if (
-                self._target_lift(current_target)
-                >= 0.8 * self.config.controller.grasp_lift_m
-            ):
-                self._manipulation_state = ManipulationState.COMPLETE
+            if self._manipulation_state is ManipulationState.LIFTING:
+                current_target = site_position(
+                    self.scene.model, self.scene.data, self.scene.target_site_name
+                )
+                if (
+                    self._target_lift(current_target)
+                    >= 0.8 * self.config.controller.grasp_lift_m
+                ):
+                    self._manipulation_state = ManipulationState.COMPLETE
 
         if self._manipulation_state in {
             ManipulationState.CLOSING,
@@ -1821,6 +1828,29 @@ class VisualServoSimulation:
             float(np.asarray(target_position, dtype=float)[2])
             - self._grasp_initial_target_z,
         )
+
+    def _task_succeeded(
+        self, final_snapshot: SimulationState, final_error_m: float
+    ) -> bool:
+        task = self.config.controller.task.strip().lower()
+        complete = self._manipulation_state is ManipulationState.COMPLETE
+        if task == "touch":
+            return complete
+        if task == "grasp":
+            required_lift = 0.8 * self.config.controller.grasp_lift_m
+            return (
+                complete
+                and final_snapshot.grasped
+                and final_snapshot.target_lift_m >= required_lift
+            )
+        if task == "pick-place":
+            return (
+                complete
+                and final_snapshot.place_error_m is not None
+                and final_snapshot.place_error_m
+                <= self.config.controller.policy_place_tolerance_m
+            )
+        return final_error_m <= self.config.settling_threshold_m
 
     def _sleep_to_simulation_time(self, sim_start: float, wall_start: float) -> None:
         while True:

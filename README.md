@@ -1,206 +1,139 @@
-# MuJoCo Visual Servo Lab
+# MuJoCo Visual Servo & Grasping
 
-一个面向学习、实验和作品展示的 MuJoCo 视觉伺服平台。当前开发只覆盖 `mujoco/`；`matlab/` 已冻结，不参与安装、测试或运行。
+一个可直接运行的 MuJoCo 视觉伺服与机械臂抓取项目。目标在动，机械臂会根据相机画面持续调整；同一套程序也可以完成接近、接触抓取、抬升和放置。
 
-![视觉伺服仪表盘](mujoco/media/visual-servo-dashboard.gif)
+![Panda 跟随移动目标](mujoco/media/visual-servo-dashboard.gif)
 
-上图由本仓库真实运行生成：Panda、颜色分割、MuJoCo RGB-D、移动目标和 Hybrid IBVS/PBVS。原始文件：[MP4](mujoco/media/visual-servo-dashboard.mp4) · [PNG](mujoco/media/visual-servo-dashboard.png)
+这段 15 秒录屏使用 Panda、固定 RGB-D 相机、颜色分割和 Hybrid 视觉伺服。红色杯子沿圆周移动，控制器只使用视觉观测更新末端目标，没有用 oracle 代替检测。录制期间完成 360 次视觉更新，没有发生跟踪丢失。下载原始画质：[MP4](mujoco/media/visual-servo-dashboard.mp4) · [PNG](mujoco/media/visual-servo-dashboard.png)
 
-## 能做什么
+## 项目包含什么
 
-- 从 MuJoCo 状态读取本体、末端、相机、目标、关节和接触信息；
-- 在 `ibvs`、`pbvs` 和 `hybrid` 三种视觉闭环之间切换；
-- 支持外部相机、眼在手上相机、同步 RGB-D 和独立概览相机；原生 viewer 始终保持自由移动；
-- 支持颜色检测和开放词汇语义检测；语义链路使用 Grounding DINO + SAM；
-- 从分割后的度量深度估计三维锚点、6D 主轴姿态和尺寸；
-- 提供带标签的多目标跟踪与短时遮挡预测；
-- 支持位置、速度、力矩和阻抗四种关节执行模式；
-- 支持跟踪、接近、接触、抓取、抬升、完整 pick-and-place 及单轴对齐任务；
-- 提供可解释抓取点评分、接触验证、放置验收、超时/滑移恢复和笛卡尔安全监督；
-- 通过 JSON 替换机器人和目标，也内置多种官方 MuJoCo Menagerie 本体；
-- 支持 Unitree G1 左/右臂视觉伺服和固定基座双臂协调原语；
-- 输出 16:9 仪表盘、MP4/MOV/AVI、运行指标和可复用 Python API。
+- `IBVS`、`PBVS` 和远近切换的 `Hybrid` 视觉伺服；
+- MuJoCo RGB-D、颜色分割，以及 Grounding DINO + SAM 开放词汇识别；
+- 位置、速度、力矩、阻抗四种关节控制方式；
+- 可执行抓取点、双指接触验证、抬升和 pick-and-place；
+- Panda、FR3、UR、xArm、Kinova、KUKA、Sawyer 和 Unitree G1 等 Menagerie 模型；
+- 可自由旋转的 MuJoCo viewer，以及适合录屏的 16:9 状态面板；
+- JSON 机器人/目标描述，可替换 MJCF、mesh、末端、夹爪和抓取点。
 
-## 真实接触抓取
+## 抓取不是位姿动画
 
-![真实接触抓取](mujoco/media/contact-grasp-dashboard.gif)
+![Panda 接触抓取](mujoco/media/contact-grasp-dashboard.gif)
 
-这段演示没有使用 weld、mocap 附着或位姿瞬移。成功条件要求两个不同手指同时接触目标、接触法向相反、法向力超过阈值、相对滑移受限，并连续保持若干控制帧。演示最终测得约 `2.18 N` 合法夹持力和 `0.13 mm/frame` 相对滑移，并完成约 `8.6 cm` 抬升。原始文件：[MP4](mujoco/media/contact-grasp-dashboard.mp4) · [PNG](mujoco/media/contact-grasp-dashboard.png)
+抓取过程不会把物体 weld 到夹爪，也不会直接改写物体位姿。系统要求两个手指形成相向接触，法向力和相对滑移同时满足阈值，才会进入抬升阶段；抬升后仍继续检查接触，物体脱落会立刻把任务改为失败。
 
-## 视觉抓取与放置策略
+当前颜色视觉验收在 207 个控制步内完成，物体抬升 `10.6 cm`，峰值合法夹持力 `20.46 N`，最终状态为 `grasp_succeeded`。原始录屏：[MP4](mujoco/media/contact-grasp-dashboard.mp4)
+
+## 从视觉抓取到放置
 
 ![颜色视觉抓取与放置](mujoco/media/pick-place-dashboard.gif)
 
-这段 20 秒实录由颜色视觉和 MuJoCo RGB-D 驱动，策略依次完成目标获取、抓取点选择、预抓取、闭合、接触验证、抬升、搬运、放置、释放和撤离。它不读取目标真值来控制；MuJoCo 真值只用于最终验收。此次录制为 `COMPLETE`，0 次恢复，最终物体中心距落点 `12.8 mm`。原始文件：[MP4](mujoco/media/pick-place-dashboard.mp4) · [PNG](mujoco/media/pick-place-dashboard.png)
+策略顺序执行目标获取、抓取点选择、预抓取、闭合、接触确认、抬升、搬运、释放和落点检查。MuJoCo 真值只参与最终评测，不作为颜色视觉控制输入。原始录屏：[MP4](mujoco/media/pick-place-dashboard.mp4)
 
-抓取规划器会把视觉深度估计的 6D 姿态用于局部抓取点变换，并拒绝夹爪过窄、数值 IK 不收敛、关节限位、离开本体工作区或路径侵入桌面的候选，再按可达性、相机可见性、宽度余量和净空排序。反应式策略在接触超时、夹持不稳定或搬运滑移时松爪、上撤，并排除失败抓取点后重新规划。释放后还会用视觉位置连续确认落点；MuJoCo 真值只用于最终评测。
+## 安装
 
-## 安装（Miniconda）
+项目使用 Miniconda。MuJoCo Menagerie 作为 git submodule 一起下载。
 
 ```bash
-git clone --recurse-submodules <repository-url>
+git clone --recurse-submodules https://github.com/MengyangGao/visual_servo_tracking.git
 cd visual_servo_tracking
 conda env create -f environment.yml
 conda activate visual_servo
 ```
 
-如果仓库已经下载但子模块为空：
-
-```bash
-git submodule update --init --recursive mujoco/vendor/mujoco_menagerie
-```
-
-如果环境已经存在：
+已有环境可以直接更新：
 
 ```bash
 conda env update -n visual_servo -f environment.yml --prune
+```
+
+## 运行
+
+### 移动目标跟随
+
+macOS 的 MuJoCo 相机和原生 viewer 需要从 `mjpython` 启动：
+
+```bash
 conda activate visual_servo
-```
-
-环境固定 Python 3.11，并以 editable 模式安装颜色视觉、语义视觉、测试和开发依赖。学习模型首次使用时会从 Hugging Face 下载权重。
-
-## 五分钟上手
-
-以下命令均在仓库根目录执行。
-
-外部相机 Hybrid 视觉跟踪：
-
-```bash
-conda run -n visual_servo mujoco-servo \
+mjpython mujoco/scripts/demo.py \
   --robot panda --target cup --trajectory circle \
-  --detector color --servo-mode hybrid
+  --detector color --servo-mode hybrid --standoff-cm 22
 ```
 
-纯 IBVS：
+viewer 相机可以自由移动。方向键可给目标叠加水平速度，`,` 和 `.` 控制下降/上升，Space 或 Backspace 清除手动偏移。
+
+Linux 无窗口运行可使用 EGL：
 
 ```bash
-conda run -n visual_servo mujoco-servo \
+MUJOCO_GL=egl mujoco-servo \
+  --headless --no-realtime --scripted-target \
   --robot panda --target cup --trajectory circle \
-  --detector color --servo-mode ibvs
+  --detector color --servo-mode hybrid --steps 1800
 ```
 
-眼在手上 IBVS：
+### 接触抓取
 
 ```bash
-conda run -n visual_servo mujoco-servo \
-  --robot panda --target cup --trajectory static \
-  --detector color --servo-mode ibvs \
-  --camera-role eye-in-hand --camera-mount-body hand
-```
-
-开放词汇语义检测与分割：
-
-```bash
-MUJOCO_SERVO_DEVICE=auto conda run -n visual_servo mujoco-servo \
-  --robot panda --target cup --prompt "red drinking mug" \
-  --detector semantic --servo-mode hybrid
-```
-
-无 weld 的视觉抓取：
-
-```bash
-conda run -n visual_servo mujoco-servo \
+mjpython mujoco/scripts/demo.py \
   --headless --no-realtime --scripted-target \
   --robot panda --target grasp-cube --trajectory static \
-  --detector color --servo-mode pbvs --task grasp \
-  --steps 300 --camera-fps 12 \
-  --record mujoco/media/my-grasp.mp4
+  --detector color --servo-mode pbvs --task grasp --steps 1800
 ```
 
-颜色视觉 pick-and-place：
+### Pick-and-place
 
 ```bash
-conda run -n visual_servo mujoco-servo \
+mjpython mujoco/scripts/demo.py \
   --headless --no-realtime --scripted-target \
   --robot panda --target grasp-cube --trajectory static \
   --detector color --servo-mode pbvs --task pick-place \
-  --steps 2400 --camera-fps 24 \
-  --record mujoco/media/my-pick-place.mp4
+  --steps 3200 --place-position 0.42 -0.16 0.25
 ```
 
-用 `--place-position X Y Z` 指定物体中心落点；也可配置 `--policy-max-attempts`、阶段超时、`--grasp-min-force`、`--grasp-max-slip`、确认/丢失帧和最大接触力。落点会在启动前检查桌面边界、物体占地、支撑高度和 IK 可达性；省略时自动选择带安全裕量的位置。策略默认在成功/失败后的短暂稳定窗口结束，`--no-stop-on-terminal` 可继续运行到步数预算。
+加上 `--record output.mp4` 可以保存状态面板。运行 `mujoco-servo --help` 查看相机、噪声、控制器、抓取阈值和策略参数。
 
-macOS 的交互 viewer 必须由 MuJoCo 的 `mjpython` 启动：
+## 三种视觉伺服
 
-```bash
-conda activate visual_servo
-mjpython mujoco/scripts/demo.py --robot panda --target cup --trajectory circle
-```
-
-方向键移动目标，`,` / `.` 控制下降/上升，Space 或 Backspace 清除手动偏移。viewer 使用自由相机；相机画面和检测结果显示在叠加层中。
-
-## 视觉伺服模式
-
-| 模式 | 闭环量 | 适合场景 |
+| 模式 | 控制依据 | 用途 |
 | --- | --- | --- |
-| `ibvs` | 归一化图像特征、像素误差和目标深度；使用点特征交互矩阵 | 展示经典视觉伺服、对标定误差更鲁棒的近距离控制 |
-| `pbvs` | 世界坐标中的三维目标/抓取位姿误差 | 大范围移动、抓取规划、可解释的米制误差 |
-| `hybrid` | 远距离 PBVS，接近目标后连续过渡到 IBVS | 默认展示和移动目标跟踪 |
+| `ibvs` | 图像特征、像素误差、目标深度 | 观察经典图像雅可比闭环 |
+| `pbvs` | 相机恢复的三维位置与姿态 | 大范围移动和抓取 |
+| `hybrid` | 远处使用 PBVS，接近后平滑切到 IBVS | 移动目标演示的默认选择 |
 
-图像外环产生世界坐标笛卡尔速度。关节层使用加权阻尼最小二乘、关节限位回避、速度/加速度限制、零空间姿态控制和感知丢失保持。`position`、`velocity`、`torque`、`impedance` 只改变低层执行方式，不改变视觉目标定义。
+视觉外环生成笛卡尔速度，关节控制器负责阻尼最小二乘、关节限位回避、速度/加速度限制和零空间姿态。检测暂时丢失时机械臂会保持，连续观测恢复后再继续跟随。
 
-```mermaid
-flowchart LR
-  RGBD["RGB-D cameras"] --> P["color or open-vocabulary perception"]
-  P --> F["2D features, mask, 3D anchor, 6D pose"]
-  F --> V["IBVS / PBVS / Hybrid objective"]
-  F --> S["grasp candidates and reactive task policy"]
-  S --> Q["safety supervisor"]
-  V --> C["constrained whole-arm controller"]
-  Q --> C
-  C --> A["position / velocity / torque / impedance"]
-  A --> M["MuJoCo dynamics and contacts"]
-  M --> RGBD
-  M --> G["contact grasp verifier"]
-```
+## 机器人模型
 
-## Menagerie 本体
+![Unitree G1 右臂视觉伺服](mujoco/media/g1-visual-servo-dashboard.gif)
 
-![Unitree G1 固定基座上肢视觉伺服](mujoco/media/g1-visual-servo-dashboard.gif)
+内置机器人来自锁定版本的 [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie)：
 
-这段 G1 右臂实录同样使用颜色视觉而非 oracle：目标持续处于 `TRACKING`，无丢失/重捕获事件，最终 16 cm standoff 误差为 `7.7 mm`。原始文件：[MP4](mujoco/media/g1-visual-servo-dashboard.mp4) · [PNG](mujoco/media/g1-visual-servo-dashboard.png)
-
-| CLI 名称 | 受控自由度 | 说明 |
+| 名称 | 自由度 | 适合的任务 |
 | --- | ---: | --- |
-| `panda` | 7 | 官方双指夹爪；真实接触抓取基准 |
-| `fr3` | 7 | Franka FR3 |
-| `ur5e` | 6 | Universal Robots UR5e 工具端 |
-| `ur10e` | 6 | Universal Robots UR10e 工具端 |
-| `lite6` | 6 | UFactory Lite6 |
-| `xarm7` | 7 | UFactory xArm7，保留官方夹爪执行器 |
-| `iiwa14` | 7 | KUKA iiwa 14 |
-| `kinova-gen3` | 7 | Kinova Gen3 |
-| `sawyer` | 7 | Rethink Sawyer |
-| `g1-right-arm` | 7 | Unitree G1 固定基座右臂学习示例 |
-| `g1-left-arm` | 7 | Unitree G1 固定基座左臂学习示例 |
+| `panda` | 7 | 跟随、接触、双指抓取、放置 |
+| `fr3` | 7 | 跟随、接触 |
+| `ur5e` / `ur10e` | 6 | 跟随、接触 |
+| `lite6` / `xarm7` | 6 / 7 | 跟随；xArm7 保留官方夹爪执行器 |
+| `iiwa14` / `kinova-gen3` / `sawyer` | 7 | 跟随、接触 |
+| `g1-left-arm` / `g1-right-arm` | 7 | 固定基座人形机器人上肢实验 |
 
-所有条目都从锁定版本的 `mujoco/vendor/mujoco_menagerie` 加载。G1 左右臂可分别运行完整视觉外环；`G1BimanualController` 可把同一视觉目标转换为左右手安全间距目标，并组合两个互不覆盖的 7-DoF 控制器。G1 示例固定浮动基座，只用于上肢视觉伺服/交接学习，不声称实现双足平衡或行走。没有夹爪的工具端模型可以完成跟踪、接近和接触；真实夹持需要描述符声明实际夹爪执行器与两侧接触体。
+G1 示例控制左右上肢，不包含双足平衡和行走。`G1BimanualController` 提供双臂目标组合与安全间距约束，方便继续做交接或双臂操作。
 
-## 相机、6D 姿态和多目标
+## 换成自己的物体或机械臂
 
-每个场景至少包含：
-
-- `servo_camera`：视觉闭环主相机，可固定在世界或挂载到机器人 body；
-- `servo_overview`：独立观察相机；
-- 原生 viewer 的自由相机：只影响人类观察，不改变控制输入。
-
-`mujoco_servo.vision.CameraRig` 可同步读取任意命名相机的 RGB-D。`estimate_pose_6d()` 从分割掩码与度量深度构建点云，再给出中心、正交主轴、三维尺寸与质量分数。抓取执行会使用该旋转，并把 PCA 的 24 种等价轴标记对齐到上一帧先验，避免接近方向随机翻转；姿态不可用时会在状态和摘要中明确标记描述符回退。`MultiTargetTracker` 用类别标签和三维最近邻保持多目标 ID，并在有界时间内进行速度预测；超时后删除轨迹而不是无限使用旧观测。
-
-## 替换目标和机器人
-
-目标 JSON 支持 primitive、compound 或 OBJ/STL mesh，包含质量、摩擦、初始四元数和多个局部抓取点。使用：
+目标描述支持 box、sphere、cylinder、capsule、compound 和 OBJ/STL mesh，并可配置尺寸、质量、摩擦、初始姿态及多个局部抓取点：
 
 ```bash
 mujoco-servo --target-file /path/to/targets.json --target my-object
 ```
 
-机器人 JSON 声明自包含 MJCF、assets、受控关节/执行器、home 位姿、末端 frame，以及可选的夹爪执行器、开合控制和双侧接触 body。使用：
+机器人描述引用一个自包含 MJCF，并声明受控关节、执行器、home 位姿、末端 frame，以及可选的夹爪控制与接触 body：
 
 ```bash
 mujoco-servo --robot-file /path/to/robots.json --robot my-robot
 ```
 
-内置描述符和严格 JSON 解析实现位于 `mujoco/src/mujoco_servo/config.py`。运行 `mujoco-servo --help` 查看完整参数。
+描述符在加载时会检查路径、关节、执行器、控制范围、工作区和抓取宽度，错误配置不会静默退回 Panda 或默认方块。
 
 ## Python API
 
@@ -211,46 +144,32 @@ from mujoco_servo.config import ControllerConfig, DemoConfig
 config = DemoConfig(
     robot="panda",
     target="cup",
-    detector="color",
-    controller=ControllerConfig(servo_mode="hybrid", actuator_mode="impedance"),
+    trajectory="circle",
+    detector="oracle",
     headless=True,
     viewer=False,
     realtime=False,
+    controller=ControllerConfig(servo_mode="hybrid"),
 )
 
 with VisualServoSimulation(config) as simulation:
     for _ in range(300):
         state = simulation.step()
-    print(state.as_dict())
+    print(state.target_position, state.end_effector_position)
 ```
 
-公共状态包括目标/末端/相机/关节位置、检测时间和协方差、跟踪状态、接触、抓取力、相对滑移和抬升高度。
-
-`pick-place` 的 `RunSummary` 还包含策略名称、尝试次数、选中/拒绝抓取点、6D 姿态来源与质量、落点、放置误差、峰值力/滑移/抬升、终止原因、任务成功标志和失败原因。策略、抓取规划器与安全监督位于 `mujoco_servo.policy`，可脱离 viewer 单独测试或替换。十项高影响问题的代码证据和修复映射见 [独立审查报告](mujoco/docs/2026-07-31-high-impact-audit.md)。
+状态中可以读取目标、末端、相机、关节、检测时间、接触力、滑移、抬升高度和策略阶段。
 
 ## 验证
 
 ```bash
-conda run -n visual_servo python -m pytest -q mujoco/tests
-conda run -n visual_servo ruff check mujoco/src mujoco/tests
-conda run -n visual_servo python -m mujoco_servo.benchmark \
-  --robots panda fr3 ur5e xarm7 g1-left-arm g1-right-arm \
-  --actuator-modes position velocity torque impedance \
-  --trajectories static circle --steps 1200
+conda run -n visual_servo pytest -q mujoco/tests
+conda run -n visual_servo ruff check mujoco
+conda run -n visual_servo python -m mujoco_servo.benchmark --enforce
 ```
 
-当前全量测试为 `246 passed, 3 skipped`，分支覆盖率 `79%`；wheel 与 sdist 均可构建。上述 1200 步基准的 48 个场景全部通过（静态阈值 10 mm、移动稳态 RMS 阈值 20 mm）。较短的 240 步窗口不足以公平验收部分力矩模式的稳定过程。
+GitHub Actions 在 Python 3.10–3.13 上运行静态检查、测试、覆盖率、wheel 构建和安装后冒烟测试。机器人与素材来源见 [mujoco/ASSETS.md](mujoco/ASSETS.md)。
 
-测试覆盖配置校验、三种视觉外环、相机几何、颜色/语义后端、深度、6D 姿态、多目标遮挡、所有内置 Menagerie 场景、四种执行模式、抓取候选排序、安全监督、接触抓取、pick-and-place 和 G1 双臂命令组合。
+## 使用边界
 
-## 明确边界
-
-- 这是高保真仿真平台，不是已验证的真实机器人安全控制器；没有 ROS 2、急停、硬件标定和实机碰撞认证。
-- 开放词汇语义与单目深度依赖外部模型，首次运行需要网络和较多内存；自动设备顺序为 CUDA、Apple MPS、CPU。
-- 基于点云 PCA 的 6D 姿态对对称物体存在不可消除的等价轴歧义；系统会保持时间连续性，但不会假装恢复不可观测方向。
-- 真实接触抓取依赖模型几何、摩擦和夹爪；不再用 weld 掩盖失败，因此任意新物体/本体都需要重新验证。
-- 当前策略是反应式笛卡尔状态机和局部抓取点规划，不是带障碍物地图的全局运动规划器；复杂杂乱场景仍需接入 OMPL/采样规划或学习策略。
-- G1 只验证固定基座上肢，不包含行走、质心/足底约束或跌倒恢复。
-- MuJoCo 动力学运行在 CPU；学习视觉可使用 CUDA/MPS，渲染使用平台 OpenGL 后端。
-
-模型许可和来源见 [mujoco/ASSETS.md](mujoco/ASSETS.md)。
+这是仿真与学习项目，不是经过安全认证的真实机器人控制器。开放词汇识别首次运行需要下载模型；学习视觉可使用 CUDA、Apple MPS 或 CPU，MuJoCo 动力学仍在 CPU 上运行。真实机械臂还需要硬件标定、通信、急停、碰撞保护和现场安全验证。

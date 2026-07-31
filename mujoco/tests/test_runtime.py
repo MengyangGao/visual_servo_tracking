@@ -10,6 +10,7 @@ from mujoco_servo import app as app_module
 from mujoco_servo.app import ManipulationState, TrackingState, VisualServoSimulation
 from mujoco_servo.clock import PhaseAccumulatorClock
 from mujoco_servo.config import CameraConfig, ControllerConfig, DemoConfig, DepthConfig
+from mujoco_servo.manipulation import GraspEvidence
 from mujoco_servo.perception import Detection
 from mujoco_servo.scene import frame_position
 
@@ -909,10 +910,47 @@ def test_real_contact_grasp_executes_and_lifts_without_weld() -> None:
     assert app.target.dynamics == "physical"
     summary = app.run()
     assert summary.manipulation_state == ManipulationState.COMPLETE.value
+    assert summary.task_succeeded
     assert summary.grasped
     assert summary.target_lift_m >= 0.09
     assert summary.contact_steps > 0
+    assert summary.steps < 1800
+    assert summary.termination_reason == "grasp_succeeded"
     assert app.scene.model.neq == 1  # Panda finger coupling only; no target weld.
+
+
+def test_completed_grasp_fails_if_verified_contact_is_lost() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            robot="panda",
+            target="grasp-cube",
+            detector="oracle",
+            trajectory="static",
+            steps=1,
+            headless=True,
+            viewer=False,
+            realtime=False,
+            manual_control=False,
+            controller=ControllerConfig(task="grasp", grasp_lost_frames=2),
+        )
+    )
+    target = app.get_state().target_position
+    app._manipulation_state = ManipulationState.COMPLETE
+    app._grasped = True
+    app._grasp_lost_frames = 1
+    app._grasp_initial_target_z = float(target[2] - 0.10)
+    app._lift_goal_position = app.get_state().end_effector_position
+
+    class LostContactEvaluator:
+        def evaluate(self, _data) -> GraspEvidence:
+            return GraspEvidence((), 0.0, False, 0, 0.02, False)
+
+    app._grasp_evaluator = LostContactEvaluator()
+    app._manipulation_targets(target, target)
+
+    assert app._manipulation_state is ManipulationState.FAILED
+    assert not app._grasped
+    assert app._max_target_lift_m >= 0.099
 
 
 def test_panda_gripper_command_remains_closed_after_grasp() -> None:
