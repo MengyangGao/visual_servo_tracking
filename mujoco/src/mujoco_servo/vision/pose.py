@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import permutations, product
 
 import numpy as np
 
@@ -14,6 +15,37 @@ class PoseEstimate6D:
     extents_m: np.ndarray
     point_count: int
     quality: float
+
+
+def align_rotation_to_reference(
+    rotation_world: np.ndarray, reference_world: np.ndarray
+) -> np.ndarray:
+    """Resolve PCA axis order/sign ambiguity against a continuous pose prior.
+
+    An oriented point-cloud box has 24 equivalent right-handed axis labellings.
+    Returning whichever eigensolver labelling happens to occur makes a grasp
+    approach flip between frames.  Select the equivalent frame closest to the
+    previous (or descriptor) rotation instead.
+    """
+    rotation = np.asarray(rotation_world, dtype=float).reshape(3, 3)
+    reference = np.asarray(reference_world, dtype=float).reshape(3, 3)
+    if not np.isfinite(rotation).all() or not np.isfinite(reference).all():
+        raise ValueError("rotations must contain finite values")
+    best: np.ndarray | None = None
+    best_score = -np.inf
+    for order in permutations(range(3)):
+        permuted = rotation[:, order]
+        for signs in product((-1.0, 1.0), repeat=3):
+            candidate = permuted * np.asarray(signs, dtype=float)
+            if np.linalg.det(candidate) < 0.0:
+                continue
+            score = float(np.trace(reference.T @ candidate))
+            if score > best_score:
+                best_score = score
+                best = candidate
+    if best is None:  # pragma: no cover - a finite orthogonal basis always has one
+        raise RuntimeError("could not construct a right-handed pose basis")
+    return best.copy()
 
 
 def estimate_pose_6d(

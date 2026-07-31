@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Callable
 
 import numpy as np
 
@@ -18,7 +19,11 @@ class SafetyLimits:
 class SafetySupervisor:
     """Fail-closed validation for task-policy Cartesian commands."""
 
-    def __init__(self, limits: SafetyLimits = SafetyLimits()) -> None:
+    def __init__(
+        self,
+        limits: SafetyLimits = SafetyLimits(),
+        path_is_valid: Callable[[np.ndarray, np.ndarray], bool] | None = None,
+    ) -> None:
         self.limits = limits
         self._minimum = np.asarray(limits.workspace_min, dtype=float).reshape(3)
         self._maximum = np.asarray(limits.workspace_max, dtype=float).reshape(3)
@@ -26,6 +31,7 @@ class SafetySupervisor:
             raise ValueError("workspace limits must be finite")
         if np.any(self._maximum <= self._minimum):
             raise ValueError("workspace maximum must exceed minimum")
+        self._path_is_valid = path_is_valid
 
     def supervise(
         self, command: PolicyCommand, observation: PolicyObservation
@@ -48,6 +54,14 @@ class SafetySupervisor:
                 GripperCommand.OPEN,
                 hold=True,
                 reason="contact force exceeded safety limit",
+            )
+        if self._path_is_valid is not None and not self._path_is_valid(ee, goal):
+            return PolicyCommand(
+                PolicyPhase.RECOVER,
+                ee.copy(),
+                GripperCommand.OPEN,
+                hold=True,
+                reason="Cartesian path failed workspace/clearance validation",
             )
         goal = np.clip(goal, self._minimum, self._maximum)
         delta = goal - ee

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 
@@ -23,6 +23,12 @@ class GraspCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class GraspRejection:
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class GraspPlanningContext:
     ee_position: np.ndarray
     camera_position: np.ndarray
@@ -30,10 +36,16 @@ class GraspPlanningContext:
     approach_distance_m: float
     max_reach_m: float = 1.0
     max_gripper_width_m: float | None = None
+    excluded_names: frozenset[str] = frozenset()
+    reachable: Callable[[np.ndarray], bool] | None = None
+    path_is_valid: Callable[[np.ndarray, np.ndarray], bool] | None = None
 
 
 class GraspPlanner:
     """Rank target-provided grasp points using geometry available at runtime."""
+
+    def __init__(self) -> None:
+        self.last_rejections: tuple[GraspRejection, ...] = ()
 
     def plan(
         self,
@@ -53,25 +65,45 @@ class GraspPlanner:
             raise ValueError("max_reach_m must be positive and finite")
 
         candidates: list[GraspCandidate] = []
+        rejections: list[GraspRejection] = []
         for index, point in enumerate(grasp_points):
+            name = str(getattr(point, "name", f"candidate-{index}"))
+            if name in context.excluded_names:
+                rejections.append(GraspRejection(name, "failed in an earlier attempt"))
+                continue
             position = _vector3(getattr(point, "position"), "grasp position")
             approach = _unit_vector(getattr(point, "approach"), "grasp approach")
             width = getattr(point, "width_m", None)
             if width is not None:
                 width = float(width)
                 if not np.isfinite(width) or width <= 0.0:
+                    rejections.append(GraspRejection(name, "invalid gripper width"))
                     continue
                 if (
                     context.max_gripper_width_m is not None
                     and width > context.max_gripper_width_m + 1e-9
                 ):
+                    rejections.append(GraspRejection(name, "wider than gripper aperture"))
                     continue
 
             pregrasp = position - approach * float(context.approach_distance_m)
             distance = float(np.linalg.norm(pregrasp - ee))
             if distance > context.max_reach_m:
+                rejections.append(GraspRejection(name, "outside coarse reach radius"))
                 continue
             if min(position[2], pregrasp[2]) < context.support_z + 0.005:
+                rejections.append(GraspRejection(name, "insufficient surface clearance"))
+                continue
+            if context.reachable is not None and not (
+                context.reachable(pregrasp) and context.reachable(position)
+            ):
+                rejections.append(GraspRejection(name, "numerical IK did not converge"))
+                continue
+            if context.path_is_valid is not None and not (
+                context.path_is_valid(ee, pregrasp)
+                and context.path_is_valid(pregrasp, position)
+            ):
+                rejections.append(GraspRejection(name, "Cartesian path is unsafe"))
                 continue
 
             reachability = float(
@@ -96,7 +128,7 @@ class GraspPlanner:
             )
             candidates.append(
                 GraspCandidate(
-                    name=str(getattr(point, "name", f"candidate-{index}")),
+                    name=name,
                     grasp_position=position.copy(),
                     pregrasp_position=pregrasp,
                     approach=approach,
@@ -108,6 +140,7 @@ class GraspPlanner:
                     clearance_score=clearance,
                 )
             )
+        self.last_rejections = tuple(rejections)
         return tuple(
             sorted(candidates, key=lambda candidate: (-candidate.score, candidate.name))
         )
@@ -120,7 +153,13 @@ class GraspPlanner:
         candidates = self.plan(grasp_points, context)
         if not candidates:
             raise RuntimeError(
-                "no reachable grasp candidate satisfies width and clearance limits"
+                "no executable grasp candidate: "
+                + (
+                    "; ".join(
+                        f"{item.name}: {item.reason}" for item in self.last_rejections
+                    )
+                    or "no candidates were provided"
+                )
             )
         return candidates[0]
 

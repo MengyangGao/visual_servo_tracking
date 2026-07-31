@@ -19,6 +19,7 @@ class PolicyPhase(str, Enum):
     PLACE = "PLACE"
     RELEASE = "RELEASE"
     RETREAT = "RETREAT"
+    VERIFY_PLACE = "VERIFY_PLACE"
     RECOVER = "RECOVER"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
@@ -41,6 +42,9 @@ class ReactivePolicyConfig:
     close_timeout_s: float = 2.5
     motion_timeout_s: float = 8.0
     max_attempts: int = 2
+    acquisition_timeout_s: float = 20.0
+    place_verification_frames: int = 3
+    place_verification_timeout_s: float = 3.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +86,8 @@ class ReactivePickPlacePolicy:
         self._target_to_grasp = np.zeros(3, dtype=float)
         self._lift_goal: np.ndarray | None = None
         self._recovery_goal: np.ndarray | None = None
+        self._failed_grasps: set[str] = set()
+        self._place_stable_frames = 0
 
     def reset(self, time_s: float = 0.0) -> None:
         self.phase = PolicyPhase.ACQUIRE
@@ -92,11 +98,20 @@ class ReactivePickPlacePolicy:
         self._target_to_grasp.fill(0.0)
         self._lift_goal = None
         self._recovery_goal = None
+        self._failed_grasps.clear()
+        self._place_stable_frames = 0
+
+    @property
+    def failed_grasps(self) -> frozenset[str]:
+        return frozenset(self._failed_grasps)
 
     def set_grasp(self, candidate: GraspCandidate, target_position: np.ndarray) -> None:
         self.selected_grasp = candidate
         target = _vector3(target_position, "target position")
         self._target_to_grasp = candidate.grasp_position - target
+        # A recovered attempt is allowed to succeed without reporting the old
+        # failure as the terminal outcome.
+        self.failure_reason = None
 
     def request_recovery(
         self, ee_position: np.ndarray, time_s: float, reason: str
@@ -134,6 +149,16 @@ class ReactivePickPlacePolicy:
                 or target is None
                 or self.selected_grasp is None
             ):
+                if now - self._phase_enter_time_s > self.config.acquisition_timeout_s:
+                    self.failure_reason = "target/grasp acquisition timed out"
+                    self._transition(PolicyPhase.FAILED, now)
+                    return PolicyCommand(
+                        self.phase,
+                        ee.copy(),
+                        GripperCommand.OPEN,
+                        hold=True,
+                        reason=self.failure_reason,
+                    )
                 return PolicyCommand(
                     self.phase,
                     ee.copy(),
@@ -144,10 +169,11 @@ class ReactivePickPlacePolicy:
             self._transition(PolicyPhase.PREGRASP, now)
 
         candidate = self.selected_grasp
-        if candidate is None:
+        if candidate is None and self.phase is not PolicyPhase.VERIFY_PLACE:
             return self._begin_recovery(ee, now, "selected grasp became unavailable")
 
         if self.phase is PolicyPhase.PREGRASP:
+            assert candidate is not None
             if not observation.tracking_valid or target is None:
                 return PolicyCommand(
                     self.phase,
@@ -167,6 +193,7 @@ class ReactivePickPlacePolicy:
                 return PolicyCommand(self.phase, goal, GripperCommand.OPEN)
 
         if self.phase is PolicyPhase.APPROACH:
+            assert candidate is not None
             if not observation.tracking_valid or target is None:
                 return PolicyCommand(
                     self.phase,
@@ -250,13 +277,14 @@ class ReactivePickPlacePolicy:
                 [0.0, 0.0, self.config.retreat_distance_m]
             )
             if _near(ee, retreat_goal, self.config.stage_tolerance_m):
-                self._transition(PolicyPhase.SUCCEEDED, now)
+                self._place_stable_frames = 0
+                self._transition(PolicyPhase.VERIFY_PLACE, now)
                 return PolicyCommand(
                     self.phase,
                     ee.copy(),
                     GripperCommand.OPEN,
                     hold=True,
-                    reason="place sequence completed",
+                    reason="verifying placement from perception",
                 )
             if self._motion_timed_out(now):
                 self.failure_reason = "retreat motion timed out"
@@ -269,6 +297,43 @@ class ReactivePickPlacePolicy:
                     reason=self.failure_reason,
                 )
             return PolicyCommand(self.phase, retreat_goal, GripperCommand.OPEN)
+
+        if self.phase is PolicyPhase.VERIFY_PLACE:
+            placement_valid = (
+                observation.tracking_valid
+                and observation.place_error_m is not None
+                and observation.place_error_m <= self.config.place_tolerance_m
+            )
+            self._place_stable_frames = (
+                self._place_stable_frames + 1 if placement_valid else 0
+            )
+            if self._place_stable_frames >= self.config.place_verification_frames:
+                self.failure_reason = None
+                self._transition(PolicyPhase.SUCCEEDED, now)
+                return PolicyCommand(
+                    self.phase,
+                    ee.copy(),
+                    GripperCommand.OPEN,
+                    hold=True,
+                    reason="placement visually verified",
+                )
+            if now - self._phase_enter_time_s > self.config.place_verification_timeout_s:
+                self.failure_reason = "visual placement verification timed out"
+                self._transition(PolicyPhase.FAILED, now)
+                return PolicyCommand(
+                    self.phase,
+                    ee.copy(),
+                    GripperCommand.OPEN,
+                    hold=True,
+                    reason=self.failure_reason,
+                )
+            return PolicyCommand(
+                self.phase,
+                ee.copy(),
+                GripperCommand.OPEN,
+                hold=True,
+                reason="waiting for placement observations",
+            )
 
         if self.phase is PolicyPhase.RECOVER:
             assert self._recovery_goal is not None
@@ -300,6 +365,8 @@ class ReactivePickPlacePolicy:
     def _begin_recovery(self, ee: np.ndarray, now: float, reason: str) -> PolicyCommand:
         self.attempts += 1
         self.failure_reason = reason
+        if self.selected_grasp is not None:
+            self._failed_grasps.add(self.selected_grasp.name)
         self._recovery_goal = ee + np.array([0.0, 0.0, self.config.retreat_distance_m])
         self._transition(PolicyPhase.RECOVER, now)
         return PolicyCommand(

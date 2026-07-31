@@ -262,6 +262,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="normal contact force safety threshold in newtons",
     )
     parser.add_argument(
+        "--grasp-min-force",
+        type=float,
+        default=0.15,
+        help="minimum summed opposing-finger force for a verified grasp",
+    )
+    parser.add_argument(
+        "--grasp-max-slip",
+        type=float,
+        default=0.006,
+        help="maximum per-step target/tool relative slip in meters",
+    )
+    parser.add_argument(
+        "--grasp-confirmation-frames",
+        type=int,
+        default=8,
+        help="consecutive stable contact frames required before lifting",
+    )
+    parser.add_argument(
+        "--grasp-lost-frames",
+        type=int,
+        default=20,
+        help="unstable frames tolerated before declaring a dropped object",
+    )
+    parser.add_argument(
+        "--policy-place-tolerance",
+        type=float,
+        default=0.035,
+        help="visual placement acceptance radius in meters",
+    )
+    parser.add_argument(
+        "--no-stop-on-terminal",
+        action="store_true",
+        help="continue to the step budget after task success or failure",
+    )
+    parser.add_argument(
         "--reacquire-confirm-frames",
         type=int,
         default=3,
@@ -391,6 +426,9 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         "--policy-close-timeout": args.policy_close_timeout,
         "--policy-motion-timeout": args.policy_motion_timeout,
         "--policy-max-force": args.policy_max_force,
+        "--grasp-min-force": args.grasp_min_force,
+        "--grasp-max-slip": args.grasp_max_slip,
+        "--policy-place-tolerance": args.policy_place_tolerance,
     }
     for option, value in positive_values.items():
         if not _is_finite(value) or value <= 0.0:
@@ -411,6 +449,12 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         )
     if args.policy_max_attempts < 1:
         raise argparse.ArgumentTypeError("--policy-max-attempts must be at least 1")
+    if args.grasp_confirmation_frames < 1:
+        raise argparse.ArgumentTypeError(
+            "--grasp-confirmation-frames must be at least 1"
+        )
+    if args.grasp_lost_frames < 1:
+        raise argparse.ArgumentTypeError("--grasp-lost-frames must be at least 1")
     if args.place_position is not None and not all(
         _is_finite(value) for value in args.place_position
     ):
@@ -475,6 +519,11 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         policy_close_timeout_s=float(args.policy_close_timeout),
         policy_motion_timeout_s=float(args.policy_motion_timeout),
         policy_max_normal_force_n=float(args.policy_max_force),
+        grasp_min_normal_force_n=float(args.grasp_min_force),
+        grasp_max_relative_slip_m=float(args.grasp_max_slip),
+        grasp_confirmation_frames=int(args.grasp_confirmation_frames),
+        grasp_lost_frames=int(args.grasp_lost_frames),
+        policy_place_tolerance_m=float(args.policy_place_tolerance),
     )
     depth = DepthConfig(
         backend=args.depth_backend,
@@ -518,6 +567,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
             add_lights=not args.no_default_lights,
         ),
         record_path=args.record_path,
+        stop_on_terminal=not args.no_stop_on_terminal,
     )
     validate_config(config)
     return config

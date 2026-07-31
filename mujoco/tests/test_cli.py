@@ -466,6 +466,17 @@ def test_cli_exposes_actuation_latency_and_environment_controls() -> None:
             "9.0",
             "--policy-max-force",
             "60.0",
+            "--grasp-min-force",
+            "0.4",
+            "--grasp-max-slip",
+            "0.002",
+            "--grasp-confirmation-frames",
+            "12",
+            "--grasp-lost-frames",
+            "18",
+            "--policy-place-tolerance",
+            "0.025",
+            "--no-stop-on-terminal",
             "--reacquire-confirm-frames",
             "4",
             "--perception-latency",
@@ -496,6 +507,12 @@ def test_cli_exposes_actuation_latency_and_environment_controls() -> None:
     assert config.controller.policy_close_timeout_s == 3.0
     assert config.controller.policy_motion_timeout_s == 9.0
     assert config.controller.policy_max_normal_force_n == 60.0
+    assert config.controller.grasp_min_normal_force_n == 0.4
+    assert config.controller.grasp_max_relative_slip_m == 0.002
+    assert config.controller.grasp_confirmation_frames == 12
+    assert config.controller.grasp_lost_frames == 18
+    assert config.controller.policy_place_tolerance_m == 0.025
+    assert not config.stop_on_terminal
     assert config.reacquire_confirm_frames == 4
     assert config.perception_latency_s == 0.08
     assert config.perception_jitter_s == 0.01

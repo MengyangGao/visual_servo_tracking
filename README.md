@@ -33,7 +33,7 @@
 
 这段 20 秒实录由颜色视觉和 MuJoCo RGB-D 驱动，策略依次完成目标获取、抓取点选择、预抓取、闭合、接触验证、抬升、搬运、放置、释放和撤离。它不读取目标真值来控制；MuJoCo 真值只用于最终验收。此次录制为 `COMPLETE`，0 次恢复，最终物体中心距落点 `12.8 mm`。原始文件：[MP4](mujoco/media/pick-place-dashboard.mp4) · [PNG](mujoco/media/pick-place-dashboard.png)
 
-抓取规划器会拒绝超过夹爪宽度、超出工作距离或侵入桌面的候选，再按可达性、相机可见性、宽度余量和净空排序。反应式策略在接触超时、夹持不稳定或搬运滑移时松爪、上撤并重新规划；重试次数有界。安全监督还会拒绝非有限命令，限制工作空间和单次目标距离，并在法向力超限时 fail closed。
+抓取规划器会把视觉深度估计的 6D 姿态用于局部抓取点变换，并拒绝夹爪过窄、数值 IK 不收敛、关节限位、离开本体工作区或路径侵入桌面的候选，再按可达性、相机可见性、宽度余量和净空排序。反应式策略在接触超时、夹持不稳定或搬运滑移时松爪、上撤，并排除失败抓取点后重新规划。释放后还会用视觉位置连续确认落点；MuJoCo 真值只用于最终评测。
 
 ## 安装（Miniconda）
 
@@ -118,7 +118,7 @@ conda run -n visual_servo mujoco-servo \
   --record mujoco/media/my-pick-place.mp4
 ```
 
-用 `--place-position X Y Z` 指定物体中心落点；也可配置 `--policy-max-attempts`、阶段超时和最大接触力。省略落点时会选择桌面内部带安全裕量的位置。
+用 `--place-position X Y Z` 指定物体中心落点；也可配置 `--policy-max-attempts`、阶段超时、`--grasp-min-force`、`--grasp-max-slip`、确认/丢失帧和最大接触力。落点会在启动前检查桌面边界、物体占地、支撑高度和 IK 可达性；省略时自动选择带安全裕量的位置。策略默认在成功/失败后的短暂稳定窗口结束，`--no-stop-on-terminal` 可继续运行到步数预算。
 
 macOS 的交互 viewer 必须由 MuJoCo 的 `mjpython` 启动：
 
@@ -184,7 +184,7 @@ flowchart LR
 - `servo_overview`：独立观察相机；
 - 原生 viewer 的自由相机：只影响人类观察，不改变控制输入。
 
-`mujoco_servo.vision.CameraRig` 可同步读取任意命名相机的 RGB-D。`estimate_pose_6d()` 从分割掩码与度量深度构建点云，再给出中心、正交主轴、三维尺寸与质量分数。`MultiTargetTracker` 用类别标签和三维最近邻保持多目标 ID，并在有界时间内进行速度预测；超时后删除轨迹而不是无限使用旧观测。
+`mujoco_servo.vision.CameraRig` 可同步读取任意命名相机的 RGB-D。`estimate_pose_6d()` 从分割掩码与度量深度构建点云，再给出中心、正交主轴、三维尺寸与质量分数。抓取执行会使用该旋转，并把 PCA 的 24 种等价轴标记对齐到上一帧先验，避免接近方向随机翻转；姿态不可用时会在状态和摘要中明确标记描述符回退。`MultiTargetTracker` 用类别标签和三维最近邻保持多目标 ID，并在有界时间内进行速度预测；超时后删除轨迹而不是无限使用旧观测。
 
 ## 替换目标和机器人
 
@@ -226,7 +226,7 @@ with VisualServoSimulation(config) as simulation:
 
 公共状态包括目标/末端/相机/关节位置、检测时间和协方差、跟踪状态、接触、抓取力、相对滑移和抬升高度。
 
-`pick-place` 的 `RunSummary` 还包含策略名称、尝试次数、选中抓取点、落点、放置误差、任务成功标志和失败原因。策略、抓取规划器与安全监督位于 `mujoco_servo.policy`，可脱离 viewer 单独测试或替换。
+`pick-place` 的 `RunSummary` 还包含策略名称、尝试次数、选中/拒绝抓取点、6D 姿态来源与质量、落点、放置误差、峰值力/滑移/抬升、终止原因、任务成功标志和失败原因。策略、抓取规划器与安全监督位于 `mujoco_servo.policy`，可脱离 viewer 单独测试或替换。十项高影响问题的代码证据和修复映射见 [独立审查报告](mujoco/docs/2026-07-31-high-impact-audit.md)。
 
 ## 验证
 
@@ -236,8 +236,10 @@ conda run -n visual_servo ruff check mujoco/src mujoco/tests
 conda run -n visual_servo python -m mujoco_servo.benchmark \
   --robots panda fr3 ur5e xarm7 g1-left-arm g1-right-arm \
   --actuator-modes position velocity torque impedance \
-  --trajectories static circle --steps 240
+  --trajectories static circle --steps 1200
 ```
+
+当前全量测试为 `246 passed, 3 skipped`，分支覆盖率 `79%`；wheel 与 sdist 均可构建。上述 1200 步基准的 48 个场景全部通过（静态阈值 10 mm、移动稳态 RMS 阈值 20 mm）。较短的 240 步窗口不足以公平验收部分力矩模式的稳定过程。
 
 测试覆盖配置校验、三种视觉外环、相机几何、颜色/语义后端、深度、6D 姿态、多目标遮挡、所有内置 Menagerie 场景、四种执行模式、抓取候选排序、安全监督、接触抓取、pick-and-place 和 G1 双臂命令组合。
 
@@ -245,7 +247,7 @@ conda run -n visual_servo python -m mujoco_servo.benchmark \
 
 - 这是高保真仿真平台，不是已验证的真实机器人安全控制器；没有 ROS 2、急停、硬件标定和实机碰撞认证。
 - 开放词汇语义与单目深度依赖外部模型，首次运行需要网络和较多内存；自动设备顺序为 CUDA、Apple MPS、CPU。
-- 基于点云 PCA 的 6D 姿态对对称物体存在不可消除的轴向歧义。
+- 基于点云 PCA 的 6D 姿态对对称物体存在不可消除的等价轴歧义；系统会保持时间连续性，但不会假装恢复不可观测方向。
 - 真实接触抓取依赖模型几何、摩擦和夹爪；不再用 weld 掩盖失败，因此任意新物体/本体都需要重新验证。
 - 当前策略是反应式笛卡尔状态机和局部抓取点规划，不是带障碍物地图的全局运动规划器；复杂杂乱场景仍需接入 OMPL/采样规划或学习策略。
 - G1 只验证固定基座上肢，不包含行走、质心/足底约束或跌倒恢复。

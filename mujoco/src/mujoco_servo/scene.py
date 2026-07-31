@@ -40,6 +40,9 @@ class Scene:
     camera_names: tuple[str, ...] = ("servo_camera", "servo_overview")
     actuator_mode: str = "position"
     grasp_attachment_body: str | None = None
+    support_z: float = 0.0
+    work_surface_center_xy: tuple[float, float] | None = None
+    work_surface_half_size_xy: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -611,6 +614,7 @@ def build_scene(
     environment: EnvironmentSpec | None = None,
 ) -> Scene:
     cam = camera or CameraConfig()
+    environment = environment or EnvironmentSpec()
     robot_spec = resolve_robot(robot) if isinstance(robot, str) else robot
     mode = actuator_mode.strip().lower()
     if mode not in available_actuator_modes():
@@ -704,6 +708,11 @@ def build_scene(
         camera_names=(cam.name, "servo_overview"),
         actuator_mode=mode,
         grasp_attachment_body=robot_spec.grasp_attachment_body,
+        support_z=0.215 if environment.add_table else 0.0,
+        work_surface_center_xy=(float(target_pos[0]), float(target_pos[1]))
+        if environment.add_table
+        else None,
+        work_surface_half_size_xy=(0.18, 0.18) if environment.add_table else None,
     )
 
 

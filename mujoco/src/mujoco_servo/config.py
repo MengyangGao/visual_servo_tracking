@@ -126,6 +126,11 @@ class ControllerConfig:
     policy_close_timeout_s: float = 2.5
     policy_motion_timeout_s: float = 8.0
     policy_max_normal_force_n: float = 80.0
+    grasp_min_normal_force_n: float = 0.15
+    grasp_max_relative_slip_m: float = 0.006
+    grasp_confirmation_frames: int = 8
+    grasp_lost_frames: int = 20
+    policy_place_tolerance_m: float = 0.035
 
 
 @dataclass(frozen=True)
@@ -457,6 +462,8 @@ class DemoConfig:
     settling_threshold_m: float = 0.01
     environment: EnvironmentSpec = field(default_factory=EnvironmentSpec)
     record_path: str | None = None
+    stop_on_terminal: bool = True
+    terminal_settle_steps: int = 30
 
 
 @dataclass(frozen=True)
@@ -553,6 +560,9 @@ def _validate_config_fields(config: DemoConfig) -> None:
         raise ValueError(f"detector must be one of {', '.join(available_detectors())}")
 
     _validate_integer(config.steps, "steps", minimum=0)
+    _validate_integer(
+        config.terminal_settle_steps, "terminal_settle_steps", minimum=0
+    )
     _validate_integer(config.seed, "seed", minimum=0)
     camera_fps = _finite_number(config.camera_fps, "camera_fps")
     if camera_fps <= 0.0:
@@ -596,6 +606,7 @@ def _validate_config_fields(config: DemoConfig) -> None:
         "manual_control",
         "camera_overlay",
         "debug_perception",
+        "stop_on_terminal",
     ):
         if not isinstance(getattr(config, name), (bool, np.bool_)):
             raise ValueError(f"{name} must be a boolean")
@@ -650,12 +661,25 @@ def _validate_controller_config(config: ControllerConfig) -> None:
         "policy_max_normal_force_n": _finite_number(
             config.policy_max_normal_force_n, "policy_max_normal_force_n"
         ),
+        "grasp_min_normal_force_n": _finite_number(
+            config.grasp_min_normal_force_n, "grasp_min_normal_force_n"
+        ),
+        "grasp_max_relative_slip_m": _finite_number(
+            config.grasp_max_relative_slip_m, "grasp_max_relative_slip_m"
+        ),
+        "policy_place_tolerance_m": _finite_number(
+            config.policy_place_tolerance_m, "policy_place_tolerance_m"
+        ),
     }
     if config.grasp_point is not None:
         _validate_nonempty_text(config.grasp_point, "grasp_point")
     if config.place_position is not None:
         _finite_vector(config.place_position, 3, "place_position")
     _validate_integer(config.policy_max_attempts, "policy_max_attempts", minimum=1)
+    _validate_integer(
+        config.grasp_confirmation_frames, "grasp_confirmation_frames", minimum=1
+    )
+    _validate_integer(config.grasp_lost_frames, "grasp_lost_frames", minimum=1)
     actuator_mode = _normalized_text(config.actuator_mode, "actuator_mode")
     if actuator_mode not in available_actuator_modes():
         raise ValueError(
@@ -716,6 +740,12 @@ def _validate_controller_config(config: ControllerConfig) -> None:
         raise ValueError("policy_motion_timeout_s must be positive")
     if values["policy_max_normal_force_n"] <= 0.0:
         raise ValueError("policy_max_normal_force_n must be positive")
+    if values["grasp_min_normal_force_n"] <= 0.0:
+        raise ValueError("grasp_min_normal_force_n must be positive")
+    if values["grasp_max_relative_slip_m"] <= 0.0:
+        raise ValueError("grasp_max_relative_slip_m must be positive")
+    if values["policy_place_tolerance_m"] <= 0.0:
+        raise ValueError("policy_place_tolerance_m must be positive")
 
 
 def _validate_environment_spec(config: EnvironmentSpec) -> None:

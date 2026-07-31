@@ -7,7 +7,7 @@ from .geometry import (
     project_world_point,
 )
 from .camera_rig import CameraRig
-from .pose import PoseEstimate6D, estimate_pose_6d
+from .pose import PoseEstimate6D, align_rotation_to_reference, estimate_pose_6d
 from .tracking import LabeledMeasurement, MultiTargetTracker, TargetTrack
 
 __all__ = [
@@ -17,6 +17,7 @@ __all__ = [
     "project_world_point",
     "CameraRig",
     "PoseEstimate6D",
+    "align_rotation_to_reference",
     "estimate_pose_6d",
     "LabeledMeasurement",
     "MultiTargetTracker",

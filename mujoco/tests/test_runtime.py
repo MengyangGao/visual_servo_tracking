@@ -965,3 +965,68 @@ def test_reactive_pick_place_completes_with_physical_contact_and_release() -> No
     assert summary.place_error_m is not None
     assert summary.place_error_m <= 0.035
     assert summary.contact_steps > 0
+    assert summary.steps < 3200
+    assert summary.termination_reason == "policy_succeeded"
+    assert summary.grasp_pose_source == "oracle-6d"
+    assert app._grasp_initial_target_z is None
+    assert summary.target_lift_m > 0.05
+    assert summary.grasp_normal_force_n > 0.0
+    assert summary.grasp_relative_slip_m > 0.0
+
+
+def test_pick_place_rejects_destination_outside_work_surface() -> None:
+    with pytest.raises(ValueError, match="work surface"):
+        VisualServoSimulation(
+            DemoConfig(
+                robot="panda",
+                target="grasp-cube",
+                detector="oracle",
+                headless=True,
+                viewer=False,
+                realtime=False,
+                controller=ControllerConfig(
+                    task="pick-place", place_position=(0.9, 0.9, 0.25)
+                ),
+            )
+        )
+
+
+def test_numerical_ik_reachability_uses_live_robot_limits() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            detector="oracle",
+            headless=True,
+            viewer=False,
+            realtime=False,
+        )
+    )
+    current = app.controller.frame_position(app.scene.data)
+    assert app.controller.is_position_reachable(app.scene.data, current)
+    assert not app.controller.is_position_reachable(
+        app.scene.data, np.array([5.0, 5.0, 5.0])
+    )
+    app.close()
+
+
+def test_contact_acceptance_thresholds_are_runtime_configuration() -> None:
+    app = VisualServoSimulation(
+        DemoConfig(
+            target="grasp-cube",
+            detector="oracle",
+            headless=True,
+            viewer=False,
+            realtime=False,
+            controller=ControllerConfig(
+                task="grasp",
+                grasp_min_normal_force_n=0.4,
+                grasp_max_relative_slip_m=0.002,
+                grasp_confirmation_frames=12,
+            ),
+        )
+    )
+    evaluator = app._grasp_evaluator
+    assert evaluator is not None
+    assert evaluator.min_normal_force_n == 0.4
+    assert evaluator.max_relative_slip_m == 0.002
+    assert evaluator.confirmation_frames == 12
+    app.close()

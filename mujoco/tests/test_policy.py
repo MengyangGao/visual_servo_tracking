@@ -5,6 +5,7 @@ from dataclasses import replace
 import numpy as np
 
 from mujoco_servo.policy import (
+    CartesianPathValidator,
     GraspPlanner,
     GraspPlanningContext,
     GripperCommand,
@@ -15,6 +16,7 @@ from mujoco_servo.policy import (
     ReactivePolicyConfig,
     SafetyLimits,
     SafetySupervisor,
+    WorkSurface,
 )
 from mujoco_servo.scene import WorldGraspPoint
 
@@ -90,6 +92,7 @@ def test_reactive_policy_completes_contact_verified_pick_place() -> None:
         placed = policy.phase in {
             PolicyPhase.RELEASE,
             PolicyPhase.RETREAT,
+            PolicyPhase.VERIFY_PLACE,
             PolicyPhase.SUCCEEDED,
         }
         command = policy.step(
@@ -175,3 +178,70 @@ def test_safety_supervisor_clamps_workspace_and_fails_closed() -> None:
     assert overforce.phase is PolicyPhase.RECOVER
     assert overforce.gripper is GripperCommand.OPEN
     assert overforce.hold
+
+
+def test_grasp_planner_reports_ik_path_and_retry_rejections() -> None:
+    planner = GraspPlanner()
+    context = GraspPlanningContext(
+        ee_position=np.array([0.4, 0.0, 0.5]),
+        camera_position=np.array([1.0, -1.0, 0.8]),
+        support_z=0.2,
+        approach_distance_m=0.08,
+        excluded_names=frozenset({"already-failed"}),
+        reachable=lambda point: point[0] < 0.7,
+        path_is_valid=lambda start, end: end[1] <= 0.2,
+    )
+    candidates = planner.plan(
+        (
+            _point("already-failed", (0.5, 0.0, 0.25)),
+            _point("ik-failed", (0.8, 0.0, 0.25)),
+            _point("path-failed", (0.5, 0.3, 0.25)),
+            _point("executable", (0.5, 0.0, 0.25)),
+        ),
+        context,
+    )
+    assert [candidate.name for candidate in candidates] == ["executable"]
+    assert {item.name for item in planner.last_rejections} == {
+        "already-failed",
+        "ik-failed",
+        "path-failed",
+    }
+
+
+def test_cartesian_path_and_work_surface_enforce_geometry() -> None:
+    surface = WorkSurface((0.5, 0.0), (0.18, 0.18), 0.215)
+    assert surface.contains(np.array([0.55, 0.1, 0.24]), inset_m=0.03)
+    assert not surface.contains(np.array([0.68, 0.0, 0.24]), inset_m=0.03)
+    validator = CartesianPathValidator(
+        np.array([0.0, -0.5, 0.0]),
+        np.array([1.0, 0.5, 1.0]),
+        support_z=0.215,
+    )
+    assert validator.check(
+        np.array([0.4, 0.0, 0.4]), np.array([0.5, 0.0, 0.25])
+    ).valid
+    assert not validator.check(
+        np.array([0.4, 0.0, 0.4]), np.array([0.5, 0.0, 0.21])
+    ).valid
+
+
+def test_policy_requires_consecutive_visual_place_acceptance() -> None:
+    policy = ReactivePickPlacePolicy(
+        ReactivePolicyConfig(
+            place_verification_frames=2,
+            place_verification_timeout_s=0.5,
+        ),
+        np.array([0.5, -0.1, 0.25]),
+    )
+    policy.phase = PolicyPhase.VERIFY_PLACE
+    policy._phase_enter_time_s = 0.0
+    observation = PolicyObservation(
+        0.1,
+        np.array([0.5, -0.1, 0.4]),
+        np.array([0.5, -0.1, 0.25]),
+        True,
+        False,
+        place_error_m=0.01,
+    )
+    assert policy.step(observation).phase is PolicyPhase.VERIFY_PLACE
+    assert policy.step(replace(observation, time_s=0.2)).phase is PolicyPhase.SUCCEEDED

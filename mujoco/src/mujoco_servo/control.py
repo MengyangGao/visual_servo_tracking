@@ -166,6 +166,73 @@ class ResolvedRateController:
         self._last_saturated_joints = 0
         self._passive_actuator_overrides.clear()
 
+    def is_position_reachable(
+        self,
+        data: mujoco.MjData,
+        target_position: np.ndarray,
+        *,
+        tolerance_m: float = 0.025,
+        max_iterations: int = 80,
+    ) -> bool:
+        """Test Cartesian reachability with bounded numerical IK on scratch data.
+
+        This never mutates the live simulation.  Unlike a radius check it
+        respects the robot's current kinematic chain and declared joint limits.
+        """
+        target = np.asarray(target_position, dtype=float).reshape(3)
+        if not np.isfinite(target).all():
+            return False
+        scratch = mujoco.MjData(self.model)
+        scratch.qpos[:] = data.qpos
+        scratch.qvel[:] = 0.0
+        if self.model.nmocap:
+            scratch.mocap_pos[:] = data.mocap_pos
+            scratch.mocap_quat[:] = data.mocap_quat
+        mujoco.mj_forward(self.model, scratch)
+        for _ in range(max(1, int(max_iterations))):
+            position = frame_position(
+                self.model,
+                scratch,
+                self.ee_frame_type,
+                self.ee_frame_name,
+                self.ee_frame_offset,
+            )
+            error = target - position
+            if float(np.linalg.norm(error)) <= float(tolerance_m):
+                return True
+            jacp = np.zeros((3, self.model.nv), dtype=float)
+            jacr = np.zeros((3, self.model.nv), dtype=float)
+            if self.ee_frame_type == "site":
+                mujoco.mj_jacSite(self.model, scratch, jacp, jacr, self._frame_id)
+            elif self.ee_frame_type == "body_point":
+                mujoco.mj_jac(
+                    self.model, scratch, jacp, jacr, position, self._frame_id
+                )
+            else:
+                mujoco.mj_jacBody(self.model, scratch, jacp, jacr, self._frame_id)
+            joint_jacobian = jacp[:, self._dof_adr]
+            step = damped_pseudo_inverse(joint_jacobian, 0.04) @ clamp_norm(
+                error, 0.08
+            )
+            step = np.clip(step, -0.18, 0.18)
+            scratch.qpos[self._qpos_adr] += step
+            for index, joint_id in enumerate(self._joint_ids):
+                if self.model.jnt_limited[joint_id]:
+                    low, high = self.model.jnt_range[joint_id]
+                    margin = min(float(self.config.joint_limit_margin), 0.2 * (high - low))
+                    scratch.qpos[self._qpos_adr[index]] = np.clip(
+                        scratch.qpos[self._qpos_adr[index]], low + margin, high - margin
+                    )
+            mujoco.mj_forward(self.model, scratch)
+        final = frame_position(
+            self.model,
+            scratch,
+            self.ee_frame_type,
+            self.ee_frame_name,
+            self.ee_frame_offset,
+        )
+        return float(np.linalg.norm(target - final)) <= float(tolerance_m)
+
     def set_gripper_closed(self, closed: bool) -> None:
         """Latch gripper controls so subsequent arm updates cannot reopen it."""
         values = (
@@ -552,6 +619,16 @@ class ResolvedRateController:
         if self.ee_frame_type == "site":
             return np.array(data.site_xmat[self._frame_id], dtype=float).reshape(3, 3)
         return np.array(data.xmat[self._frame_id], dtype=float).reshape(3, 3)
+
+    def frame_position(self, data: mujoco.MjData) -> np.ndarray:
+        """Return this controller's configured tool point in world coordinates."""
+        return frame_position(
+            self.model,
+            data,
+            self.ee_frame_type,
+            self.ee_frame_name,
+            self.ee_frame_offset,
+        )
 
     def _actuator_id_for_joint(self, joint_name: str, index: int) -> int:
         return resolve_joint_actuator(self.model, self.robot, joint_name, index)
