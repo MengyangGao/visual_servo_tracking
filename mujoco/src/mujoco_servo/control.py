@@ -31,6 +31,8 @@ class ServoState:
     actuator_mode: str = "position"
     saturated_joints: int = 0
     adaptive_damping: float = 0.0
+    servo_mode: str = "pbvs"
+    image_error_px: float = 0.0
 
 
 def desired_ee_position(
@@ -254,6 +256,9 @@ class ResolvedRateController:
         time_s: float,
         step_index: int,
         dt: float | None = None,
+        *,
+        cartesian_velocity_world: np.ndarray | None = None,
+        desired_rotation_world: np.ndarray | None = None,
     ) -> ServoState:
         target = np.asarray(target_position, dtype=float).reshape(3)
         if self._filtered_target is None:
@@ -279,11 +284,20 @@ class ResolvedRateController:
             self.robot.base_position,
         )
         error = desired - ee_pos
-        ee_velocity = clamp_norm(
-            float(self.config.position_gain) * error, self.config.max_ee_speed
+        ee_velocity = (
+            clamp_norm(
+                float(self.config.position_gain) * error, self.config.max_ee_speed
+            )
+            if cartesian_velocity_world is None
+            else clamp_norm(
+                np.asarray(cartesian_velocity_world, dtype=float).reshape(3),
+                self.config.max_ee_speed,
+            )
         )
-        desired_rotation = desired_ee_orientation(
-            self.config.task, self._filtered_target, desired
+        desired_rotation = (
+            desired_ee_orientation(self.config.task, self._filtered_target, desired)
+            if desired_rotation_world is None
+            else np.asarray(desired_rotation_world, dtype=float).reshape(3, 3)
         )
 
         jacp = np.zeros((3, self.model.nv), dtype=float)
@@ -335,8 +349,10 @@ class ResolvedRateController:
             correction = damped_pseudo_inverse(correction_jac, adaptive_damping) @ (
                 angular_velocity - orientation_jac @ qvel
             )
-            position_gate = float(
-                np.clip(1.0 - np.linalg.norm(error) / 0.025, 0.0, 1.0)
+            position_gate = (
+                1.0
+                if desired_rotation_world is not None
+                else float(np.clip(1.0 - np.linalg.norm(error) / 0.025, 0.0, 1.0))
             )
             qvel = qvel + (0.30 * position_gate) * (primary_nullspace @ correction)
             stacked_jac = np.vstack([position_jac, orientation_jac])
@@ -481,7 +497,7 @@ class ResolvedRateController:
     ) -> int:
         del dt_s  # Kept explicit in this boundary for future discrete actuator models.
         mode = self.actuator_mode
-        if mode not in {"position", "velocity", "torque"}:
+        if mode not in {"position", "velocity", "torque", "impedance"}:
             raise ValueError(f"unknown actuator mode '{mode}'")
         current_qpos = np.asarray(data.qpos[self._qpos_adr], dtype=float)
         current_qvel = np.asarray(data.qvel[self._dof_adr], dtype=float)
@@ -506,8 +522,12 @@ class ResolvedRateController:
                 qvel_command, dtype=float
             ) + bias / (self._actuator_gears * gains)
         else:
-            kp = float(getattr(self.config, "torque_kp", 80.0))
-            kd = float(getattr(self.config, "torque_kd", 8.0))
+            if mode == "impedance":
+                kp = float(getattr(self.config, "impedance_kp", 35.0))
+                kd = float(getattr(self.config, "impedance_kd", 6.0))
+            else:
+                kp = float(getattr(self.config, "torque_kp", 80.0))
+                kd = float(getattr(self.config, "torque_kd", 8.0))
             generalized_torque = (
                 np.asarray(data.qfrc_bias[self._dof_adr], dtype=float)
                 + kp * (np.asarray(position_reference, dtype=float) - current_qpos)

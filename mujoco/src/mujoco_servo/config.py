@@ -27,6 +27,7 @@ class CameraConfig:
     position: tuple[float, float, float] = (0.85, -1.15, 0.85)
     lookat: tuple[float, float, float] = (0.45, 0.0, 0.35)
     mount_body: str | None = None
+    role: str = "external"
     rgb_noise_std: float = 0.0
     depth_noise_std: float = 0.0
     dropout_probability: float = 0.0
@@ -108,9 +109,12 @@ class ControllerConfig:
     max_angular_speed: float = 1.0
     smooth_target_alpha: float = 0.55
     actuator_mode: str = "position"
+    servo_mode: str = "hybrid"
     max_joint_accel: float = 8.0
     torque_kp: float = 80.0
     torque_kd: float = 8.0
+    impedance_kp: float = 35.0
+    impedance_kd: float = 6.0
     joint_limit_margin: float = 0.05
     grasp_point: str | None = None
     grasp_approach_m: float = 0.08
@@ -151,6 +155,8 @@ class RobotSpec:
     gripper_actuator_names: tuple[str, ...] = ()
     gripper_open_ctrl: tuple[float, ...] = ()
     gripper_closed_ctrl: tuple[float, ...] = ()
+    gripper_contact_bodies: tuple[str, ...] = ()
+    fixed_base: bool = False
     schema_version: int = 1
 
     @property
@@ -194,6 +200,7 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         gripper_actuator_names=("actuator8",),
         gripper_open_ctrl=(255.0,),
         gripper_closed_ctrl=(0.0,),
+        gripper_contact_bodies=("left_finger", "right_finger"),
     ),
     "ur5e": RobotSpec(
         name="ur5e",
@@ -237,6 +244,142 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         aliases=("ufactory-lite6", "ufactory_lite6", "xarm-lite6"),
         grasp_attachment_body="link6",
     ),
+    "fr3": RobotSpec(
+        name="fr3",
+        xml_path=MENAGERIE_HOME / "franka_fr3" / "fr3.xml",
+        asset_dir=MENAGERIE_HOME / "franka_fr3" / "assets",
+        joint_names=tuple(f"fr3_joint{i}" for i in range(1, 8)),
+        actuator_names=tuple(f"fr3_joint{i}" for i in range(1, 8)),
+        home_qpos=(0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853),
+        ee_frame_name="attachment_site",
+        ee_frame_type="site",
+        default_target_position=(0.52, 0.08, 0.38),
+        detection_bounds=((-0.2, -0.6, 0.05), (0.9, 0.6, 0.9)),
+        aliases=("franka-fr3", "franka_fr3"),
+        grasp_attachment_body="fr3_link7",
+    ),
+    "xarm7": RobotSpec(
+        name="xarm7",
+        xml_path=MENAGERIE_HOME / "ufactory_xarm7" / "xarm7.xml",
+        asset_dir=MENAGERIE_HOME / "ufactory_xarm7" / "assets",
+        joint_names=tuple(f"joint{i}" for i in range(1, 8)),
+        actuator_names=tuple(f"act{i}" for i in range(1, 8)),
+        home_qpos=(0.0, -0.247, 0.0, 0.909, 0.0, 1.15644, 0.0),
+        ee_frame_name="link_tcp",
+        ee_frame_type="site",
+        passive_actuator_ctrl=(("gripper", 0.0),),
+        max_gripper_width_m=0.085,
+        default_target_position=(0.48, 0.08, 0.34),
+        detection_bounds=((-0.25, -0.6, 0.03), (0.9, 0.6, 0.9)),
+        aliases=("ufactory-xarm7", "ufactory_xarm7"),
+        grasp_attachment_body="link7",
+        gripper_actuator_names=("gripper",),
+        gripper_open_ctrl=(0.0,),
+        gripper_closed_ctrl=(255.0,),
+        gripper_contact_bodies=("left_finger", "right_finger"),
+    ),
+    "iiwa14": RobotSpec(
+        name="iiwa14",
+        xml_path=MENAGERIE_HOME / "kuka_iiwa_14" / "iiwa14.xml",
+        asset_dir=MENAGERIE_HOME / "kuka_iiwa_14" / "assets",
+        joint_names=tuple(f"joint{i}" for i in range(1, 8)),
+        actuator_names=tuple(f"actuator{i}" for i in range(1, 8)),
+        home_qpos=(0.0, 0.45, 0.0, -1.4, 0.0, 1.1, 0.0),
+        ee_frame_name="attachment_site",
+        ee_frame_type="site",
+        default_target_position=(0.55, 0.10, 0.42),
+        detection_bounds=((-0.3, -0.7, 0.03), (1.0, 0.7, 1.1)),
+        aliases=("kuka-iiwa14", "kuka_iiwa_14"),
+        grasp_attachment_body="link7",
+    ),
+    "kinova-gen3": RobotSpec(
+        name="kinova-gen3",
+        xml_path=MENAGERIE_HOME / "kinova_gen3" / "gen3.xml",
+        asset_dir=MENAGERIE_HOME / "kinova_gen3" / "assets",
+        joint_names=tuple(f"joint_{i}" for i in range(1, 8)),
+        actuator_names=tuple(f"joint_{i}" for i in range(1, 8)),
+        home_qpos=(0.0, -0.5, 0.0, 1.45, 0.0, -0.9, 0.0),
+        ee_frame_name="pinch_site",
+        ee_frame_type="site",
+        default_target_position=(0.50, 0.08, 0.38),
+        detection_bounds=((-0.4, -0.7, 0.03), (1.0, 0.7, 1.1)),
+        aliases=("gen3", "kinova_gen3"),
+        grasp_attachment_body="bracelet_link",
+    ),
+    "ur10e": RobotSpec(
+        name="ur10e",
+        xml_path=MENAGERIE_HOME / "universal_robots_ur10e" / "ur10e.xml",
+        asset_dir=MENAGERIE_HOME / "universal_robots_ur10e" / "assets",
+        joint_names=(
+            "shoulder_pan_joint",
+            "shoulder_lift_joint",
+            "elbow_joint",
+            "wrist_1_joint",
+            "wrist_2_joint",
+            "wrist_3_joint",
+        ),
+        actuator_names=(
+            "shoulder_pan",
+            "shoulder_lift",
+            "elbow",
+            "wrist_1",
+            "wrist_2",
+            "wrist_3",
+        ),
+        home_qpos=(-1.5708, -1.35, 1.45, -1.65, -1.5708, 0.0),
+        ee_frame_name="attachment_site",
+        ee_frame_type="site",
+        default_target_position=(-0.45, 0.65, 0.48),
+        detection_bounds=((-1.2, -0.9, 0.03), (0.8, 1.2, 1.4)),
+        aliases=("universal-robots-ur10e", "universal_robots_ur10e"),
+        grasp_attachment_body="wrist_3_link",
+    ),
+    "sawyer": RobotSpec(
+        name="sawyer",
+        xml_path=MENAGERIE_HOME / "rethink_robotics_sawyer" / "sawyer.xml",
+        asset_dir=MENAGERIE_HOME / "rethink_robotics_sawyer" / "assets",
+        joint_names=tuple(f"right_j{i}" for i in range(7)),
+        actuator_names=tuple(f"a{i}" for i in range(7)),
+        home_qpos=(0.0, -0.9, 0.0, 1.5, 0.0, 0.8, 0.0),
+        ee_frame_name="attachment_site",
+        ee_frame_type="site",
+        default_target_position=(0.55, -0.10, 0.50),
+        detection_bounds=((-0.5, -1.0, 0.03), (1.2, 0.9, 1.5)),
+        aliases=("rethink-sawyer", "rethink_robotics_sawyer"),
+        grasp_attachment_body="right_l6",
+    ),
+    "g1-right-arm": RobotSpec(
+        name="g1-right-arm",
+        xml_path=MENAGERIE_HOME / "unitree_g1" / "g1_with_hands.xml",
+        asset_dir=MENAGERIE_HOME / "unitree_g1" / "assets",
+        joint_names=(
+            "right_shoulder_pitch_joint",
+            "right_shoulder_roll_joint",
+            "right_shoulder_yaw_joint",
+            "right_elbow_joint",
+            "right_wrist_roll_joint",
+            "right_wrist_pitch_joint",
+            "right_wrist_yaw_joint",
+        ),
+        actuator_names=(
+            "right_shoulder_pitch_joint",
+            "right_shoulder_roll_joint",
+            "right_shoulder_yaw_joint",
+            "right_elbow_joint",
+            "right_wrist_roll_joint",
+            "right_wrist_pitch_joint",
+            "right_wrist_yaw_joint",
+        ),
+        home_qpos=(0.0, -0.2, 0.0, 0.65, 0.0, 0.0, 0.0),
+        ee_frame_name="right_wrist_yaw_link",
+        ee_frame_type="body_point",
+        ee_frame_offset=(0.055, 0.0, 0.0),
+        default_target_position=(0.42, -0.32, 1.05),
+        detection_bounds=((-0.5, -0.9, 0.4), (0.9, 0.4, 1.8)),
+        aliases=("unitree-g1", "unitree_g1", "g1"),
+        grasp_attachment_body="right_wrist_yaw_link",
+        fixed_base=True,
+    ),
 }
 
 
@@ -270,6 +413,7 @@ class DemoConfig:
     perception_drop_probability: float = 0.0
     settling_threshold_m: float = 0.01
     environment: EnvironmentSpec = field(default_factory=EnvironmentSpec)
+    record_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -295,7 +439,15 @@ def available_tasks() -> tuple[str, ...]:
 
 
 def available_actuator_modes() -> tuple[str, ...]:
-    return ("position", "velocity", "torque")
+    return ("position", "velocity", "torque", "impedance")
+
+
+def available_servo_modes() -> tuple[str, ...]:
+    return ("ibvs", "pbvs", "hybrid")
+
+
+def available_camera_roles() -> tuple[str, ...]:
+    return ("external", "eye-in-hand")
 
 
 def available_trajectories() -> tuple[str, ...]:
@@ -342,6 +494,10 @@ def _validate_config_fields(config: DemoConfig) -> None:
         _validate_nonempty_text(config.target_file, "target_file")
     if config.perception_prompt is not None:
         _validate_nonempty_text(config.perception_prompt, "perception_prompt")
+    if config.record_path is not None:
+        _validate_nonempty_text(config.record_path, "record_path")
+        if Path(config.record_path).suffix.lower() not in {".mp4", ".mov", ".avi"}:
+            raise ValueError("record_path must end in .mp4, .mov, or .avi")
 
     trajectory = _normalized_text(config.trajectory, "trajectory")
     if trajectory not in available_trajectories():
@@ -428,6 +584,8 @@ def _validate_controller_config(config: ControllerConfig) -> None:
         "max_joint_accel": _finite_number(config.max_joint_accel, "max_joint_accel"),
         "torque_kp": _finite_number(config.torque_kp, "torque_kp"),
         "torque_kd": _finite_number(config.torque_kd, "torque_kd"),
+        "impedance_kp": _finite_number(config.impedance_kp, "impedance_kp"),
+        "impedance_kd": _finite_number(config.impedance_kd, "impedance_kd"),
         "joint_limit_margin": _finite_number(
             config.joint_limit_margin, "joint_limit_margin"
         ),
@@ -451,6 +609,15 @@ def _validate_controller_config(config: ControllerConfig) -> None:
         raise ValueError(
             "actuator_mode must be normalized lowercase without surrounding whitespace"
         )
+    servo_mode = _normalized_text(config.servo_mode, "servo_mode")
+    if servo_mode not in available_servo_modes():
+        raise ValueError(
+            f"servo_mode must be one of {', '.join(available_servo_modes())}"
+        )
+    if config.servo_mode != servo_mode:
+        raise ValueError(
+            "servo_mode must be normalized lowercase without surrounding whitespace"
+        )
     if values["control_hz"] <= 0.0:
         raise ValueError("control_hz must be positive")
     if values["position_gain"] < 0.0:
@@ -473,6 +640,10 @@ def _validate_controller_config(config: ControllerConfig) -> None:
         raise ValueError("torque_kp must be positive")
     if values["torque_kd"] < 0.0:
         raise ValueError("torque_kd must be non-negative")
+    if values["impedance_kp"] <= 0.0:
+        raise ValueError("impedance_kp must be positive")
+    if values["impedance_kd"] < 0.0:
+        raise ValueError("impedance_kd must be non-negative")
     if values["joint_limit_margin"] < 0.0:
         raise ValueError("joint_limit_margin must be non-negative")
     if values["grasp_approach_m"] <= 0.0:
@@ -512,6 +683,15 @@ def _validate_camera_config(config: CameraConfig) -> None:
         raise ValueError("camera position and lookat must be distinct")
     if config.mount_body is not None:
         _validate_nonempty_text(config.mount_body, "camera mount_body")
+    role = _normalized_text(config.role, "camera role")
+    if role not in available_camera_roles():
+        raise ValueError(
+            f"camera role must be one of {', '.join(available_camera_roles())}"
+        )
+    if config.role != role:
+        raise ValueError("camera role must be normalized lowercase")
+    if role == "eye-in-hand" and config.mount_body is None:
+        raise ValueError("eye-in-hand camera requires camera mount_body")
     rgb_noise = _finite_number(config.rgb_noise_std, "camera rgb_noise_std")
     depth_noise = _finite_number(config.depth_noise_std, "camera depth_noise_std")
     dropout = _finite_number(config.dropout_probability, "camera dropout_probability")
@@ -599,6 +779,8 @@ _ROBOT_OPTIONAL_FIELDS = {
     "gripper_actuator_names",
     "gripper_open_ctrl",
     "gripper_closed_ctrl",
+    "gripper_contact_bodies",
+    "fixed_base",
 }
 
 
@@ -744,6 +926,14 @@ def _robot_from_mapping(entry: dict[str, Any], base_dir: Path, index: int) -> Ro
         len(gripper_actuator_names),
         f"robot '{name}'.gripper_closed_ctrl",
     )
+    gripper_contact_bodies = _json_text_list(
+        entry.get("gripper_contact_bodies", []),
+        f"robot '{name}'.gripper_contact_bodies",
+        allow_empty=True,
+    )
+    fixed_base = entry.get("fixed_base", False)
+    if not isinstance(fixed_base, bool):
+        raise ValueError(f"robot '{name}'.fixed_base must be a boolean")
 
     if not xml_path.is_file():
         raise FileNotFoundError(
@@ -774,6 +964,8 @@ def _robot_from_mapping(entry: dict[str, Any], base_dir: Path, index: int) -> Ro
         gripper_actuator_names=gripper_actuator_names,
         gripper_open_ctrl=gripper_open_ctrl,
         gripper_closed_ctrl=gripper_closed_ctrl,
+        gripper_contact_bodies=gripper_contact_bodies,
+        fixed_base=fixed_base,
         schema_version=schema_version,
     )
 

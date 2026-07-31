@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import numpy as np
+
+from ._bootstrap import SRC  # noqa: F401
+
+from mujoco_servo.config import ROBOT_SPECS, CameraConfig
+from mujoco_servo.core import FeatureObservation, ServoMode
+from mujoco_servo.perception import CameraIntrinsics, CameraObservation
+from mujoco_servo.scene import build_scene
+from mujoco_servo.servo import VisualServoObjective
+from mujoco_servo.targets import TARGETS
+from mujoco_servo.vision import (
+    LabeledMeasurement,
+    MultiTargetTracker,
+    estimate_pose_6d,
+    point_interaction_matrix,
+    project_world_point,
+)
+
+
+def _observation() -> CameraObservation:
+    return CameraObservation(
+        frame_bgr=np.zeros((80, 100, 3), dtype=np.uint8),
+        depth_m=np.ones((80, 100), dtype=np.float32),
+        intrinsics=CameraIntrinsics(100.0, 100.0, 49.5, 39.5, 100, 80),
+        camera_position=np.zeros(3),
+        camera_xmat=np.eye(3),
+        depth_backend="mujoco",
+        depth_metric=True,
+    )
+
+
+def test_projection_and_interaction_matrix_are_metric_and_finite() -> None:
+    observation = _observation()
+    pixel, depth = project_world_point(np.array([0.1, -0.2, -1.0]), observation)
+    assert np.allclose(pixel, [59.5, 59.5])
+    assert depth == 1.0
+    assert np.isfinite(point_interaction_matrix(0.1, -0.2, depth)).all()
+
+
+def test_ibvs_and_hybrid_close_image_features() -> None:
+    observation = _observation()
+    feature = FeatureObservation(np.array([70.0, 40.0]), 1.0, 0.9)
+    for mode in (ServoMode.IBVS, ServoMode.HYBRID):
+        objective = VisualServoObjective(mode=mode).compute(
+            ee_position_world=np.array([0.25, 0.0, -1.0]),
+            desired_position_world=np.array([0.0, 0.0, -1.0]),
+            camera=observation,
+            target_feature=feature,
+            camera_role="external",
+        )
+        assert objective.image_error_px > 0.0
+        assert np.isfinite(objective.linear_velocity_world).all()
+        assert np.linalg.norm(objective.linear_velocity_world) <= 0.45 + 1e-9
+
+
+def test_six_d_pose_uses_segmented_metric_depth() -> None:
+    observation = _observation()
+    mask = np.zeros((80, 100), dtype=np.uint8)
+    mask[25:55, 35:65] = 255
+    pose = estimate_pose_6d(observation, mask)
+    assert pose is not None
+    assert pose.point_count == 900
+    assert np.allclose(
+        pose.rotation_world.T @ pose.rotation_world, np.eye(3), atol=1e-6
+    )
+    assert pose.extents_m.min() > 0.0
+
+
+def test_multi_target_tracker_predicts_through_short_occlusion() -> None:
+    tracker = MultiTargetTracker(occlusion_timeout_s=0.3)
+    tracks = tracker.update([LabeledMeasurement("cup", np.zeros(3), 0.9)], 0.1)
+    track_id = tracks[0].track_id
+    tracker.update([LabeledMeasurement("cup", np.array([0.01, 0.0, 0.0]), 0.9)], 0.1)
+    predicted = tracker.update([], 0.1)
+    assert predicted[0].track_id == track_id
+    assert predicted[0].missed_s == 0.1
+    assert tracker.update([], 0.3) == ()
+
+
+def test_all_menagerie_profiles_compile_into_the_platform_scene() -> None:
+    for robot in ROBOT_SPECS.values():
+        scene = build_scene(TARGETS["cup"], CameraConfig(), robot)
+        assert scene.source == "menagerie"
+        assert scene.model.nv >= robot.dof
+        assert set(scene.camera_names) == {"servo_camera", "servo_overview"}

@@ -14,6 +14,17 @@ from .config import GraspPoint, TargetPart, TargetSpec
 
 
 TARGETS: dict[str, TargetSpec] = {
+    "grasp-cube": TargetSpec(
+        "grasp-cube",
+        "box",
+        (0.045, 0.045, 0.065),
+        (0.12, 0.72, 0.92, 1.0),
+        ("grasp cube", "training block", "cyan block"),
+        mass=0.08,
+        friction=(1.2, 0.01, 0.002),
+        dynamics="physical",
+        grasp_points=(GraspPoint("center", width_m=0.045),),
+    ),
     "cup": TargetSpec(
         "cup",
         "compound",

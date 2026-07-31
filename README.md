@@ -1,370 +1,219 @@
-# Visual Servo Tracking
+# MuJoCo Visual Servo Lab
 
-This repository contains a configurable MuJoCo RGB-D visual-servo simulator. The active implementation is under `mujoco/`; `matlab/` is a frozen historical archive and is not part of current validation.
+一个面向学习、实验和作品展示的 MuJoCo 视觉伺服平台。当前开发只覆盖 `mujoco/`；`matlab/` 已冻结，不参与安装、测试或运行。
 
-The MuJoCo implementation supports:
+![视觉伺服仪表盘](mujoco/media/visual-servo-dashboard.gif)
 
-- simulator-truth, color, and open-vocabulary semantic target detection;
-- metric MuJoCo depth and optional Depth Anything V2;
-- world-fixed or robot-mounted RGB-D cameras, with optional sensor noise and dropout;
-- Franka Panda, Universal Robots UR5e, and UFactory Lite6 models from MuJoCo Menagerie;
-- position-, velocity-, and torque-actuated joint control;
-- visual reference targets and free-body physical targets;
-- versioned custom robot and target descriptors, including executable grasp points;
-- reusable `reset()`, `step()`, `observe()`, and `close()` simulation APIs;
-- a benchmark matrix, branch-coverage checks, and Linux EGL CI.
+上图由本仓库真实运行生成：Panda、颜色分割、MuJoCo RGB-D、移动目标和 Hybrid IBVS/PBVS。原始文件：[MP4](mujoco/media/visual-servo-dashboard.mp4) · [PNG](mujoco/media/visual-servo-dashboard.png)
 
-The default remains intentionally lightweight: Panda, cup, color segmentation, MuJoCo metric depth, position actuation, and a stable 16 cm standoff task. Select `--task front-standoff` when tool-axis facing is part of the experiment.
+## 能做什么
 
-## Install
+- 从 MuJoCo 状态读取本体、末端、相机、目标、关节和接触信息；
+- 在 `ibvs`、`pbvs` 和 `hybrid` 三种视觉闭环之间切换；
+- 支持外部相机、眼在手上相机、同步 RGB-D 和独立概览相机；原生 viewer 始终保持自由移动；
+- 支持颜色检测和开放词汇语义检测；语义链路使用 Grounding DINO + SAM；
+- 从分割后的度量深度估计三维锚点、6D 主轴姿态和尺寸；
+- 提供带标签的多目标跟踪与短时遮挡预测；
+- 支持位置、速度、力矩和阻抗四种关节执行模式；
+- 支持跟踪、接近、接触、抓取、抬升及单轴对齐任务；
+- 通过 JSON 替换机器人和目标，也内置多种官方 MuJoCo Menagerie 本体；
+- 输出 16:9 仪表盘、MP4/MOV/AVI、运行指标和可复用 Python API。
 
-Initialize the pinned Menagerie assets first:
+## 真实接触抓取
+
+![真实接触抓取](mujoco/media/contact-grasp-dashboard.gif)
+
+这段演示没有使用 weld、mocap 附着或位姿瞬移。成功条件要求两个不同手指同时接触目标、接触法向相反、法向力超过阈值、相对滑移受限，并连续保持若干控制帧。演示最终测得约 `2.18 N` 合法夹持力和 `0.13 mm/frame` 相对滑移，并完成约 `8.6 cm` 抬升。原始文件：[MP4](mujoco/media/contact-grasp-dashboard.mp4) · [PNG](mujoco/media/contact-grasp-dashboard.png)
+
+## 安装（Miniconda）
+
+```bash
+git clone --recurse-submodules <repository-url>
+cd visual_servo_tracking
+conda env create -f environment.yml
+conda activate visual_servo
+```
+
+如果仓库已经下载但子模块为空：
 
 ```bash
 git submodule update --init --recursive mujoco/vendor/mujoco_menagerie
 ```
 
-### Conda environment
-
-The checked-in environment installs semantic, test, and development dependencies:
+如果环境已经存在：
 
 ```bash
-conda env create -f environment.yml
+conda env update -n visual_servo -f environment.yml --prune
 conda activate visual_servo
 ```
 
-Recreate it after dependency changes with:
+环境固定 Python 3.11，并以 editable 模式安装颜色视觉、语义视觉、测试和开发依赖。学习模型首次使用时会从 Hugging Face 下载权重。
+
+## 五分钟上手
+
+以下命令均在仓库根目录执行。
+
+外部相机 Hybrid 视觉跟踪：
 
 ```bash
-conda env remove -n visual_servo
-conda env create -f environment.yml
+conda run -n visual_servo mujoco-servo \
+  --robot panda --target cup --trajectory circle \
+  --detector color --servo-mode hybrid
 ```
 
-### Python virtual environment
-
-For the lightweight color/oracle simulator:
+纯 IBVS：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e "mujoco[test,dev]"
+conda run -n visual_servo mujoco-servo \
+  --robot panda --target cup --trajectory circle \
+  --detector color --servo-mode ibvs
 ```
 
-Install optional semantic and learned-depth dependencies with:
+眼在手上 IBVS：
 
 ```bash
-python -m pip install -e "mujoco[semantic,test,dev]"
+conda run -n visual_servo mujoco-servo \
+  --robot panda --target cup --trajectory static \
+  --detector color --servo-mode ibvs \
+  --camera-role eye-in-hand --camera-mount-body hand
 ```
 
-Python 3.10 or newer and MuJoCo 3.3.1 or newer are required.
-
-## Stable smoke commands
-
-These oracle commands do not render and are suitable for a display-independent controller check:
+开放词汇语义检测与分割：
 
 ```bash
-python -m mujoco_servo \
-  --headless --no-realtime \
-  --detector oracle --trajectory static \
-  --robot panda --target cup \
-  --actuator-mode position --steps 240
-
-python -m mujoco_servo \
-  --headless --no-realtime \
-  --detector oracle --trajectory static \
-  --robot panda --target cup \
-  --actuator-mode velocity --steps 240
-
-python -m mujoco_servo \
-  --headless --no-realtime \
-  --detector oracle --trajectory static \
-  --robot panda --target cup \
-  --actuator-mode torque --steps 240
+MUJOCO_SERVO_DEVICE=auto conda run -n visual_servo mujoco-servo \
+  --robot panda --target cup --prompt "red drinking mug" \
+  --detector semantic --servo-mode hybrid
 ```
 
-The installed `mujoco-servo` command and `python mujoco/scripts/demo.py` accept the same options. Run `python -m mujoco_servo --help` for the authoritative list.
-
-### Interactive viewer
-
-Linux and Windows:
+无 weld 的视觉抓取：
 
 ```bash
-python -m mujoco_servo --robot panda --target cup --trajectory circle
+conda run -n visual_servo mujoco-servo \
+  --headless --no-realtime --scripted-target \
+  --robot panda --target grasp-cube --trajectory static \
+  --detector color --servo-mode pbvs --task grasp \
+  --steps 300 --camera-fps 12 \
+  --record mujoco/media/my-grasp.mp4
 ```
 
-macOS must launch the native passive viewer through MuJoCo's `mjpython`:
+macOS 的交互 viewer 必须由 MuJoCo 的 `mjpython` 启动：
 
 ```bash
+conda activate visual_servo
 mjpython mujoco/scripts/demo.py --robot panda --target cup --trajectory circle
 ```
 
-Viewer target controls are the arrow keys for horizontal motion, `,` and `.` for down/up, and Space or Backspace to reset the manual offset. `--scripted-target` disables keyboard offsets.
+方向键移动目标，`,` / `.` 控制下降/上升，Space 或 Backspace 清除手动偏移。viewer 使用自由相机；相机画面和检测结果显示在叠加层中。
 
-### Three built-in robots
+## 视觉伺服模式
 
-```bash
-python -m mujoco_servo --headless --no-realtime --detector oracle --trajectory static --robot panda --target cup --steps 240
-python -m mujoco_servo --headless --no-realtime --detector oracle --trajectory static --robot ur5e --target box --steps 240
-python -m mujoco_servo --headless --no-realtime --detector oracle --trajectory static --robot lite6 --target apple --steps 240
-```
-
-| Robot | Controlled joints | End-effector frame | Grasp attachment |
-| --- | ---: | --- | --- |
-| `panda` | 7 | `hand` body point + 0.10 m local offset | `hand`; official coupled finger actuator metadata is retained |
-| `ur5e` | 6 | `attachment_site` | `wrist_3_link` weld/suction abstraction |
-| `lite6` | 6 | `attachment_site` | `link6` weld/suction abstraction |
-
-All three compile in every supported actuator mode. UR5e and Lite6 do not include a modeled gripper in these Menagerie files, so their stable grasp abstraction is an explicit runtime weld rather than a simulated finger closure.
-
-## Perception
-
-### Color
-
-Color perception segments the selected target's configured dominant RGBA and unprojects the visible mask with metric depth:
-
-```bash
-python -m mujoco_servo \
-  --headless --no-realtime \
-  --detector color --depth-backend mujoco \
-  --robot panda --target cup --trajectory static \
-  --camera-fps 6 --steps 240
-```
-
-Color and semantic modes still render RGB-D when `--headless` is used, so they require a working OpenGL context. Linux CI uses `MUJOCO_GL=egl`; macOS background sessions without CoreGraphics may not support offscreen rendering.
-
-### Semantic recognition
-
-Semantic perception uses Grounding DINO for open-vocabulary boxes, SAM for masks, and a local color/depth tracker between redetections:
-
-```bash
-MUJOCO_SERVO_DEVICE=auto mjpython mujoco/scripts/demo.py \
-  --robot panda --target cup \
-  --detector semantic --prompt "red drinking mug" \
-  --depth-backend mujoco --trajectory static --camera-fps 3
-```
-
-Device selection in `auto` mode is CUDA, then Apple MPS when available, then CPU. On Apple Silicon no explicit MPS flag is needed; `--depth-device auto` and `MUJOCO_SERVO_DEVICE=auto` select it automatically. macOS viewer perception stays on the main thread to respect AppKit restrictions.
-
-The JSON run summary records the effective `perception_device` and `depth_device`. MuJoCo rigid-body dynamics itself runs on CPU; rendering uses the platform OpenGL backend, while learned perception/depth can use CUDA or MPS.
-
-The first semantic run downloads model weights unless they are already cached. Override model/device settings with:
-
-| Variable | Default |
-| --- | --- |
-| `MUJOCO_SERVO_GDINO_MODEL` | `IDEA-Research/grounding-dino-tiny` |
-| `MUJOCO_SERVO_SAM_MODEL` | `facebook/sam-vit-base` |
-| `MUJOCO_SERVO_DEVICE` | `auto` |
-| `MUJOCO_SERVO_GDINO_BOX_THRESHOLD` | `0.25` |
-| `MUJOCO_SERVO_GDINO_TEXT_THRESHOLD` | `0.25` |
-| `MUJOCO_SERVO_REDETECT_INTERVAL` | `45` |
-| `MUJOCO_SERVO_MAX_TRACK_FAILURES` | `3` |
-
-### Depth and observation timing
-
-MuJoCo metric depth is the default. Optional learned depth is selected with `--depth-backend depth-anything-v2`; relative monocular output is diagnostic-only unless metric calibration succeeds. Non-metric anchors never drive the Cartesian controller.
-
-The runtime models target loss and reacquisition explicitly. Useful robustness controls include:
-
-- `--detection-timeout` and `--reacquire-confirm-frames`;
-- `--perception-latency`, `--perception-jitter`, and `--perception-drop-probability`;
-- `--rgb-noise-std`, `--depth-noise-std`, and `--camera-dropout-probability`.
-
-Color and semantic detections are visible surface anchors. Oracle detection reads the simulated `target_site` center. Their reported 3D positions therefore need not match for a large object.
-
-## Controller and actuator modes
-
-The Cartesian resolved-rate controller uses weighted adaptive damping, joint-limit avoidance, acceleration and speed limits, null-space posture control, and exact hold behavior during perception loss.
-
-| Mode | CLI | Meaning |
+| 模式 | 闭环量 | 适合场景 |
 | --- | --- | --- |
-| Position | `--actuator-mode position` | Sends joint-position references to MuJoCo position servos. |
-| Velocity | `--actuator-mode velocity` | Rewrites controlled actuators as velocity servos and sends velocity references with bias-force feed-forward. |
-| Torque | `--actuator-mode torque` | Rewrites controlled actuators as motors and applies bias compensation plus joint-space PD torque. |
+| `ibvs` | 归一化图像特征、像素误差和目标深度；使用点特征交互矩阵 | 展示经典视觉伺服、对标定误差更鲁棒的近距离控制 |
+| `pbvs` | 世界坐标中的三维目标/抓取位姿误差 | 大范围移动、抓取规划、可解释的米制误差 |
+| `hybrid` | 远距离 PBVS，接近目标后连续过渡到 IBVS | 默认展示和移动目标跟踪 |
 
-Relevant tuning flags are `--control-hz`, `--max-joint-accel`, `--joint-limit-margin`, `--torque-kp`, and `--torque-kd`. Torque mode is still a simulation controller; its gains are not safe commands for a real robot.
+图像外环产生世界坐标笛卡尔速度。关节层使用加权阻尼最小二乘、关节限位回避、速度/加速度限制、零空间姿态控制和感知丢失保持。`position`、`velocity`、`torque`、`impedance` 只改变低层执行方式，不改变视觉目标定义。
 
-Tasks include `front-standoff`, `standoff`, `contact`, `touch`, `grasp`, and single-axis alignment. `touch` and `grasp` use a staged pregrasp/approach/lift workflow with physical targets. `--grasp-point`, `--grasp-approach`, `--grasp-attach-distance`, `--grasp-lift`, and `--grasp-stage-tolerance` expose task tuning without changing the descriptor. Grasp attachment is explicit and reversible; it is not a claim of force-closure grasp synthesis.
-
-## Physical targets and grasp points
-
-Targets default to `"dynamics": "visual"`, preserving the old mocap-controlled, non-colliding reference behavior. `"dynamics": "physical"` creates a colliding free body with mass and friction; it falls under MuJoCo gravity and can contact the default table.
-
-Target files accept a top-level list or a versioned wrapper. Missing `schema_version` means version 1 for backward compatibility:
-
-```json
-{
-  "schema_version": 1,
-  "targets": [
-    {
-      "schema_version": 1,
-      "name": "grasp-box",
-      "shape": "box",
-      "size": [0.06, 0.05, 0.10],
-      "rgba": [0.18, 0.52, 0.92, 1.0],
-      "base_position": [0.48, 0.0, 0.40],
-      "quat": [1.0, 0.0, 0.0, 0.0],
-      "dynamics": "physical",
-      "mass": 0.20,
-      "friction": [0.9, 0.01, 0.001],
-      "grasp_points": [
-        {
-          "name": "top",
-          "position": [0.0, 0.0, 0.05],
-          "approach": [0.0, 0.0, -1.0],
-          "width_m": 0.05
-        }
-      ]
-    }
-  ]
-}
+```mermaid
+flowchart LR
+  RGBD["RGB-D cameras"] --> P["color or open-vocabulary perception"]
+  P --> F["2D features, mask, 3D anchor, 6D pose"]
+  F --> V["IBVS / PBVS / Hybrid objective"]
+  V --> C["constrained whole-arm controller"]
+  C --> A["position / velocity / torque / impedance"]
+  A --> M["MuJoCo dynamics and contacts"]
+  M --> RGBD
+  M --> G["contact grasp verifier"]
 ```
 
-`position` and `approach` are expressed in the target body's local coordinates; `approach` points along the final motion from pregrasp to grasp and is normalized. The optional width is checked against robot gripper metadata where available. If no grasp point is supplied, a center top-down grasp point with an inferred XY width is created.
+## Menagerie 本体
 
-Select the target with:
+| CLI 名称 | 受控自由度 | 说明 |
+| --- | ---: | --- |
+| `panda` | 7 | 官方双指夹爪；真实接触抓取基准 |
+| `fr3` | 7 | Franka FR3 |
+| `ur5e` | 6 | Universal Robots UR5e 工具端 |
+| `ur10e` | 6 | Universal Robots UR10e 工具端 |
+| `lite6` | 6 | UFactory Lite6 |
+| `xarm7` | 7 | UFactory xArm7，保留官方夹爪执行器 |
+| `iiwa14` | 7 | KUKA iiwa 14 |
+| `kinova-gen3` | 7 | Kinova Gen3 |
+| `sawyer` | 7 | Rethink Sawyer |
+| `g1-right-arm` | 7 | Unitree G1 固定基座右臂学习示例 |
+
+所有条目都从锁定版本的 `mujoco/vendor/mujoco_menagerie` 加载。G1 示例固定浮动基座，用于上肢视觉伺服，不声称实现双足平衡。没有夹爪的工具端模型可以完成跟踪、接近和接触；要进行真实夹持，应通过机器人描述符声明实际夹爪执行器与两侧接触体。
+
+## 相机、6D 姿态和多目标
+
+每个场景至少包含：
+
+- `servo_camera`：视觉闭环主相机，可固定在世界或挂载到机器人 body；
+- `servo_overview`：独立观察相机；
+- 原生 viewer 的自由相机：只影响人类观察，不改变控制输入。
+
+`mujoco_servo.vision.CameraRig` 可同步读取任意命名相机的 RGB-D。`estimate_pose_6d()` 从分割掩码与度量深度构建点云，再给出中心、正交主轴、三维尺寸与质量分数。`MultiTargetTracker` 用类别标签和三维最近邻保持多目标 ID，并在有界时间内进行速度预测；超时后删除轨迹而不是无限使用旧观测。
+
+## 替换目标和机器人
+
+目标 JSON 支持 primitive、compound 或 OBJ/STL mesh，包含质量、摩擦、初始四元数和多个局部抓取点。使用：
 
 ```bash
-python -m mujoco_servo \
-  --target grasp-box --target-file /path/to/targets.json \
-  --task grasp --detector oracle --trajectory static
+mujoco-servo --target-file /path/to/targets.json --target my-object
 ```
 
-A built-in target is automatically promoted to physical dynamics when `--task touch` or `--task grasp` is selected. A stable display-independent grasp smoke is:
+机器人 JSON 声明自包含 MJCF、assets、受控关节/执行器、home 位姿、末端 frame，以及可选的夹爪执行器、开合控制和双侧接触 body。使用：
 
 ```bash
-python -m mujoco_servo \
-  --headless --no-realtime \
-  --robot panda --target cup \
-  --task grasp --detector oracle --trajectory static \
-  --steps 1200
+mujoco-servo --robot-file /path/to/robots.json --robot my-robot
 ```
 
-OBJ/STL mesh targets and mesh parts are supported. When mesh `size` is omitted, the loader computes its scaled AABB from OBJ or binary/ASCII STL vertices. Paths resolve relative to the target descriptor.
+内置描述符和严格 JSON 解析实现位于 `mujoco/src/mujoco_servo/config.py`。运行 `mujoco-servo --help` 查看完整参数。
 
-`VisualServoSimulation.get_grasp_point()`, `activate_grasp()`, and `release_grasp()` provide public explicit attachment control. The lower-level scene functions are `grasp_point_world()`, `activate_grasp()`, and `deactivate_grasp()`.
-
-## Camera and environment
-
-The default camera is world-fixed and automatically side-framed for the selected robot workspace. A non-default Python `CameraConfig(position=..., lookat=...)` preserves an explicit world pose.
-
-For an eye-in-hand camera, set a robot body name; position and look-at coordinates then use that body's local frame. Use Python when an explicit local pose is required:
+## Python API
 
 ```python
-from mujoco_servo import CameraConfig, DemoConfig, VisualServoSimulation
+from mujoco_servo.app import VisualServoSimulation
+from mujoco_servo.config import ControllerConfig, DemoConfig
 
 config = DemoConfig(
-    camera=CameraConfig(
-        mount_body="hand",
-        position=(0.0, 0.0, 0.05),
-        lookat=(0.0, 0.0, 0.30),
-    )
-)
-with VisualServoSimulation(config) as simulation:
-    print(simulation.observe().camera_position)
-```
-
-`--camera-mount-body hand` exposes the mounting choice from the CLI; the complete local camera pose is currently configured through `CameraConfig`.
-
-The built-in floor, table, and lights can be disabled independently with `--no-default-floor`, `--no-default-table`, and `--no-default-lights`, or with `EnvironmentSpec` from Python.
-
-## Python episode API
-
-`VisualServoSimulation` can be used without its long-running viewer loop:
-
-```python
-from mujoco_servo import DemoConfig, VisualServoSimulation
-
-config = DemoConfig(
-    detector="oracle",
-    trajectory="static",
-    steps=120,
+    robot="panda",
+    target="cup",
+    detector="color",
+    controller=ControllerConfig(servo_mode="hybrid", actuator_mode="impedance"),
     headless=True,
     viewer=False,
     realtime=False,
 )
 
 with VisualServoSimulation(config) as simulation:
-    initial = simulation.reset()
-    for _ in range(120):
+    for _ in range(300):
         state = simulation.step()
-    observed = simulation.observe()
-    print(observed.as_dict())
-    print(simulation.get_body_position("target"))
-    print(simulation.get_site_position("target_site"))
+    print(state.as_dict())
 ```
 
-- `reset()` restores the initial MuJoCo and runtime state and returns a `SimulationState`.
-- `step()` advances one requested controller interval and returns a `SimulationState`.
-- `observe()`/`get_state()` return copies of simulator and accepted perception state.
-- `close()` releases renderer and perception workers and is safe to call repeatedly.
-- The context manager calls `close()` automatically.
-- `get_grasp_point()`, `activate_grasp()`, and `release_grasp()` expose explicit physical-target attachment control.
+公共状态包括目标/末端/相机/关节位置、检测时间和协方差、跟踪状态、接触、抓取力、相对滑移和抬升高度。
 
-World positions are meters. Hinge positions are radians and slide positions are meters. Detection covariance/timestamps, tracking state, manipulation state, contact/grasp/lift status, target/EE/camera positions, and ordered robot joint positions are included in the public state.
-
-## Robot replacement
-
-`--robot-file` accepts a robot object, list, or `{"schema_version": 1, "robots": [...]}`. Version 1 is assumed for old descriptors. At minimum each robot declares:
-
-- `name`, `xml_path`, and `asset_dir`;
-- ordered `joint_names`, `actuator_names`, and `home_qpos`;
-- `ee_frame` with `name`, `type`, and optional local `offset`.
-
-Optional fields include aliases, tool axis, base position, workspace detection bounds, passive actuator controls, grasp attachment body, and gripper open/close metadata. Controlled joints must be scalar hinge/slide joints with joint transmissions. Official Menagerie position actuators can be rewritten into velocity or torque mode at scene construction.
-
-Custom MJCF currently must be a self-contained `<mujoco>` document; `<include>` is rejected. Asset paths remain external and are not copied into wheels. Full descriptor and asset rules are in [`mujoco/ASSETS.md`](mujoco/ASSETS.md).
-
-## Benchmark, tests, and CI
-
-Run the full local suite:
+## 验证
 
 ```bash
-python -m pytest -q mujoco/tests
-ruff check mujoco
-ruff format --check mujoco/src mujoco/tests mujoco/scripts
-coverage run --branch -m pytest -q mujoco/tests
-coverage report --fail-under=75
+conda run -n visual_servo python -m pytest -q mujoco/tests
+conda run -n visual_servo ruff check mujoco/src mujoco/tests
+conda run -n visual_servo python -m mujoco_servo.benchmark \
+  --robots panda fr3 ur5e xarm7 g1-right-arm \
+  --actuator-modes position velocity torque impedance \
+  --trajectories static circle --steps 240
 ```
 
-Run a reproducible oracle matrix and write its JSON report:
+测试覆盖配置校验、三种视觉外环、相机几何、颜色/语义后端、深度、6D 姿态、多目标遮挡、所有内置 Menagerie 场景、四种执行模式、接触抓取与运行指标。
 
-```bash
-mujoco-servo-benchmark \
-  --robots panda ur5e lite6 \
-  --actuator-modes position velocity torque \
-  --trajectories static circle \
-  --seeds 7 \
-  --steps 1200 \
-  --output /tmp/mujoco-servo-benchmark.json
-```
+## 明确边界
 
-`--enforce` returns nonzero if any configured position/orientation threshold is missed. Static scenarios use final error; moving scenarios use RMS over the second half of the episode so startup transients do not masquerade as tracking error. Orientation is gated only for `front-standoff`. Inspect each scenario's `acceptance` object when changing tasks or thresholds.
+- 这是高保真仿真平台，不是已验证的真实机器人安全控制器；没有 ROS 2、急停、硬件标定和实机碰撞认证。
+- 开放词汇语义与单目深度依赖外部模型，首次运行需要网络和较多内存；自动设备顺序为 CUDA、Apple MPS、CPU。
+- 基于点云 PCA 的 6D 姿态对对称物体存在不可消除的轴向歧义。
+- 真实接触抓取依赖模型几何、摩擦和夹爪；不再用 weld 掩盖失败，因此任意新物体/本体都需要重新验证。
+- MuJoCo 动力学运行在 CPU；学习视觉可使用 CUDA/MPS，渲染使用平台 OpenGL 后端。
 
-GitHub Actions runs Python 3.10–3.13 on Ubuntu with EGL, Ruff formatting/linting, branch coverage of at least 75%, wheel construction, and an installed-wheel oracle smoke test.
-
-## Wheel and external assets
-
-A wheel contains simulator code, not Menagerie or user meshes. Point an installed wheel at a Menagerie checkout before importing the package:
-
-```bash
-export MUJOCO_MENAGERIE_PATH=/absolute/path/to/mujoco_menagerie
-python -m mujoco_servo --headless --detector oracle --steps 2 --no-realtime
-```
-
-## Current limits
-
-- There is no real-camera/real-robot transport, ROS/ROS 2 integration, hardware safety layer, or hardware calibration workflow in the MuJoCo implementation.
-- Multi-object detection, association, and simultaneous multi-arm/multi-target control are intentionally deferred; one selected target is controlled per simulation.
-- Semantic quality and latency depend on model weights, prompt, hardware, and cache/network availability. Routine tests mock large-model inference.
-- Eye-in-hand mounting and synthetic noise are implemented, but camera intrinsic/extrinsic calibration estimation and distortion simulation are not.
-- Grasp attachment is a deterministic weld/suction abstraction. General grasp synthesis, tactile sensing, force closure, slip, and contact-force control are not implemented.
-- The controller does not perform global collision-aware motion planning or obstacle avoidance.
-- Monocular relative depth remains diagnostic-only unless metric calibration succeeds.
-- Custom robots require compatible scalar joints, actuator transmissions, EE conventions, and a self-contained MJCF. Descriptor validation cannot prove reachability or stability.
-- Custom target geometry is limited to primitives, compounds, OBJ, and STL; textured semantic realism depends on user-provided scene assets.
-- Wheels do not embed Menagerie or user assets.
-
-## MATLAB archive
-
-`matlab/` contains earlier calibration, fixed-camera, eye-in-hand, and real-camera experiments. It is frozen and intentionally excluded from current implementation and acceptance scope.
+模型许可和来源见 [mujoco/ASSETS.md](mujoco/ASSETS.md)。

@@ -14,7 +14,9 @@ from .config import (
     available_actuator_modes,
     available_depth_backends,
     available_detectors,
+    available_camera_roles,
     available_robots,
+    available_servo_modes,
     available_tasks,
     available_trajectories,
     validate_config,
@@ -58,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="standoff",
         choices=available_tasks(),
         help="servo objective",
+    )
+    parser.add_argument(
+        "--servo-mode",
+        default="hybrid",
+        choices=available_servo_modes(),
+        help="visual feedback law: image-based, pose-based, or hybrid",
     )
     parser.add_argument(
         "--detector",
@@ -175,6 +183,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="joint-space torque controller derivative gain",
     )
     parser.add_argument(
+        "--impedance-kp",
+        type=float,
+        default=35.0,
+        help="joint-space impedance stiffness",
+    )
+    parser.add_argument(
+        "--impedance-kd",
+        type=float,
+        default=6.0,
+        help="joint-space impedance damping",
+    )
+    parser.add_argument(
         "--joint-limit-margin",
         type=float,
         default=0.05,
@@ -195,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--grasp-attach-distance",
         type=float,
         default=0.065,
-        help="maximum weld activation distance in meters",
+        help="maximum distance for starting physical gripper closure",
     )
     parser.add_argument(
         "--grasp-lift",
@@ -270,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="robot body for an eye-in-hand camera; default is world-fixed",
     )
     parser.add_argument(
+        "--camera-role",
+        default="external",
+        choices=available_camera_roles(),
+        help="external camera or eye-in-hand camera mounted to --camera-mount-body",
+    )
+    parser.add_argument(
         "--rgb-noise-std",
         type=float,
         default=0.0,
@@ -286,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="camera frame dropout probability",
+    )
+    parser.add_argument(
+        "--record",
+        dest="record_path",
+        default=None,
+        help="write the presentation dashboard to an MP4/MOV/AVI file",
     )
     return parser
 
@@ -318,6 +350,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         "--control-hz": args.control_hz,
         "--max-joint-accel": args.max_joint_accel,
         "--torque-kp": args.torque_kp,
+        "--impedance-kp": args.impedance_kp,
         "--settling-threshold": args.settling_threshold,
         "--grasp-approach": args.grasp_approach,
         "--grasp-attach-distance": args.grasp_attach_distance,
@@ -329,6 +362,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
             raise argparse.ArgumentTypeError(f"{option} must be positive")
     nonnegative_values = {
         "--torque-kd": args.torque_kd,
+        "--impedance-kd": args.impedance_kd,
         "--joint-limit-margin": args.joint_limit_margin,
         "--perception-latency": args.perception_latency,
         "--perception-jitter": args.perception_jitter,
@@ -366,6 +400,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         mount_body=None
         if args.camera_mount_body is None
         else args.camera_mount_body.strip(),
+        role=args.camera_role,
         rgb_noise_std=float(args.rgb_noise_std),
         depth_noise_std=float(args.depth_noise_std),
         dropout_probability=float(args.camera_dropout_probability),
@@ -380,9 +415,12 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         standoff_m=standoff_m,
         control_hz=float(args.control_hz),
         actuator_mode=args.actuator_mode,
+        servo_mode=args.servo_mode,
         max_joint_accel=float(args.max_joint_accel),
         torque_kp=float(args.torque_kp),
         torque_kd=float(args.torque_kd),
+        impedance_kp=float(args.impedance_kp),
+        impedance_kd=float(args.impedance_kd),
         joint_limit_margin=float(args.joint_limit_margin),
         grasp_point=None if args.grasp_point is None else args.grasp_point.strip(),
         grasp_approach_m=float(args.grasp_approach),
@@ -431,6 +469,7 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
             add_table=not args.no_default_table,
             add_lights=not args.no_default_lights,
         ),
+        record_path=args.record_path,
     )
     validate_config(config)
     return config

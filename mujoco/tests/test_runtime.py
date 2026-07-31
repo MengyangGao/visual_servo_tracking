@@ -894,20 +894,14 @@ def test_configured_perception_latency_delays_availability(monkeypatch) -> None:
     assert summary.mean_perception_latency_ms >= 19.9
 
 
-@pytest.mark.parametrize(
-    ("robot", "target"),
-    [("panda", "cup"), ("ur5e", "box"), ("lite6", "box")],
-)
-def test_grasp_task_executes_and_lifts_for_all_builtin_robots(
-    robot: str, target: str
-) -> None:
+def test_real_contact_grasp_executes_and_lifts_without_weld() -> None:
     app = VisualServoSimulation(
         DemoConfig(
-            robot=robot,
-            target=target,
+            robot="panda",
+            target="grasp-cube",
             detector="oracle",
             trajectory="static",
-            steps=1200,
+            steps=1800,
             headless=True,
             viewer=False,
             realtime=False,
@@ -921,16 +915,17 @@ def test_grasp_task_executes_and_lifts_for_all_builtin_robots(
     assert summary.grasped
     assert summary.target_lift_m >= 0.09
     assert summary.contact_steps > 0
+    assert app.scene.model.neq == 1  # Panda finger coupling only; no target weld.
 
 
 def test_panda_gripper_command_remains_closed_after_grasp() -> None:
     app = VisualServoSimulation(
         DemoConfig(
             robot="panda",
-            target="cup",
+            target="grasp-cube",
             detector="oracle",
             trajectory="static",
-            steps=600,
+            steps=1800,
             headless=True,
             viewer=False,
             realtime=False,

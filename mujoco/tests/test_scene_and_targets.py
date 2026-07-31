@@ -152,7 +152,11 @@ def test_scene_uses_robot_default_target_position_and_supports_no_keyframe(
     )
     assert np.allclose(
         camera_position(scene.model, scene.data, scene.camera_name),
-        scene.data.cam_xpos[0],
+        scene.data.cam_xpos[
+            mujoco.mj_name2id(
+                scene.model, mujoco.mjtObj.mjOBJ_CAMERA, scene.camera_name
+            )
+        ],
     )
 
 
@@ -839,7 +843,7 @@ def test_physical_target_falls_onto_table_and_has_contact(tmp_path) -> None:
     assert scene.data.ncon > 0
 
 
-def test_grasp_points_transform_to_world_and_weld_can_toggle(tmp_path) -> None:
+def test_grasp_points_transform_and_grasp_command_adds_no_weld(tmp_path) -> None:
     target_file = tmp_path / "targets.json"
     target_file.write_text(
         json.dumps(
@@ -879,12 +883,11 @@ def test_grasp_points_transform_to_world_and_weld_can_toggle(tmp_path) -> None:
     assert np.allclose(point.position, [0.0, 0.0, 0.40])
     assert np.allclose(point.approach, [0.0, 0.0, -1.0])
     activate_grasp(scene, "top", max_distance_m=0.2)
-    equality_id = mujoco.mj_name2id(
-        scene.model, mujoco.mjtObj.mjOBJ_EQUALITY, "servo_grasp_weld"
+    assert (
+        mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_EQUALITY, "servo_grasp_weld")
+        == -1
     )
-    assert scene.data.eq_active[equality_id]
     deactivate_grasp(scene)
-    assert not scene.data.eq_active[equality_id]
 
 
 def test_default_grasp_point_is_top_down() -> None:
